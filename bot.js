@@ -2,8 +2,8 @@
  * Richup.io Overnight Custom Game Farming Bot
  * Architektura:
  *  - Okno 1 (HOST): Twoje główne konto (zapisana sesja w profiles/host) - ZAWSZE WYGRYWA
- *  - Okno 2 (BOT 1): Konto gościa (profiles/bot1) - poddaje się po 100 rundach
- *  - Okno 3 (BOT 2): Konto gościa (profiles/bot2) - poddaje się po 120 rundach
+ *  - Okno 2 (BOT 1): Konto gościa (profiles/bot1) - poddaje się po 35 rundach
+ *  - Okno 3 (BOT 2): Konto gościa (profiles/bot2) - poddaje się po 45 rundach
  *
  * Wszystkie boty rzucają kostką, kupują pola (bez budowania domków/hoteli) i kończą tury.
  * W ustawieniach pokoju ustawiana jest maksymalna kasa startowa i wyłączane są aukcje.
@@ -30,10 +30,10 @@ try {
 
 // ==================== KONFIGURACJA ====================
 const CONFIG = {
-  bot1SurrenderRound: 100, // Bot 1 poddaje się po 100 swoich rundach
-  bot2SurrenderRound: 120, // Bot 2 poddaje się po 120 swoich rundach
+  bot1SurrenderRound: 35,  // Bot 1 poddaje się po 35 swoich rundach
+  bot2SurrenderRound: 45,  // Bot 2 poddaje się po 45 swoich rundach
   tickIntervalMs: 800,     // Częstotliwość sprawdzania stanu gry (ms)
-  maxGameDurationMs: 35 * 60 * 1000, // Watchdog: max 35 minut na jedną grę
+  maxGameDurationMs: 25 * 60 * 1000, // Watchdog: max 25 minut na jedną grę
   chromePath: findChromePath(),
   instances: [
     {
@@ -48,22 +48,22 @@ const CONFIG = {
     },
     {
       id: 'bot1',
-      name: 'BOT 1 (Gość - 100 rund)',
+      name: 'BOT 1 (Gość - 35 rund)',
       port: 9223,
       profileDir: path.join(__dirname, 'profiles', 'bot1'),
       windowPos: '640,0',
       windowSize: '640,900',
-      surrenderAtRound: 100,
+      surrenderAtRound: 35,
       preferredColorIndex: 2,
     },
     {
       id: 'bot2',
-      name: 'BOT 2 (Gość - 120 rund)',
+      name: 'BOT 2 (Gość - 45 rund)',
       port: 9224,
       profileDir: path.join(__dirname, 'profiles', 'bot2'),
       windowPos: '1280,0',
       windowSize: '640,900',
-      surrenderAtRound: 120,
+      surrenderAtRound: 45,
       preferredColorIndex: 5,
     },
   ],
@@ -286,7 +286,6 @@ class BrowserClient {
     if (Date.now() - this.lastTurnstileClick < 4000) return false;
 
     const box = await this.eval(() => {
-      // 1. Szukamy iframe Cloudflare Turnstile lub kontenera pod "Loading game..."
       const iframes = Array.from(document.querySelectorAll('iframe'));
       for (const ifr of iframes) {
         const src = (ifr.src || '').toLowerCase();
@@ -301,7 +300,6 @@ class BrowserClient {
         }
       }
 
-      // 2. Jeśli Turnstile jest w Shadow DOM (częste w nowszych wersjach Cloudflare), szukamy kontenera o wymiarach ~300x65 pod "Loading game..."
       const bodyText = document.body ? document.body.innerText : '';
       if (/loading game/i.test(bodyText)) {
         const divs = Array.from(document.querySelectorAll('div'));
@@ -339,7 +337,7 @@ class BrowserClient {
 // ==================== SKRYPTY WSTRZYKIWANE DO STRONY (DOM HELPERS) ====================
 
 /**
- * Aktualizuje nakładkę HUD na stronie i zwraca stan przycisków sterujących HUD-em
+ * Aktualizuje nakładkę HUD na stronie, wykrywa zdobyte monety ("You just earned X Coin") i zwraca stan przycisków
  */
 function pageUpdateHUD(hudData) {
   let box = document.getElementById('richup-bot-hud');
@@ -360,7 +358,7 @@ function pageUpdateHUD(hudData) {
       'line-height:1.45',
       'border:2px solid #6366f1',
       'box-shadow:0 8px 20px rgba(0,0,0,0.5)',
-      'min-width:230px',
+      'min-width:235px',
       'user-select:none',
     ].join(';');
 
@@ -409,6 +407,26 @@ function pageUpdateHUD(hudData) {
 
   window.__rbState = window.__rbState || { paused: false, forceNewRoom: false, forceSurrender: false };
 
+  // Sprawdzamy czy na ekranie pojawił się komunikat "You just earned X Coin(s)!" lub "You earned a coin"
+  let newlyEarnedCoins = 0;
+  if (hudData.roleId === 'host' && document.body) {
+    const txt = document.body.innerText || '';
+    const m = txt.match(/You just earned\s+(\d+)\s+Coin/i);
+    if (m) {
+      if (!window.__rbCoinToastSeen) {
+        window.__rbCoinToastSeen = true;
+        newlyEarnedCoins = parseInt(m[1], 10) || 1;
+      }
+    } else if (/You earned a coin for this win/i.test(txt)) {
+      if (!window.__rbCoinToastSeen) {
+        window.__rbCoinToastSeen = true;
+        newlyEarnedCoins = 1;
+      }
+    } else {
+      window.__rbCoinToastSeen = false;
+    }
+  }
+
   const titleEl = box.querySelector('#rb-title');
   const statsEl = box.querySelector('#rb-stats');
   const actionEl = box.querySelector('#rb-action');
@@ -418,7 +436,7 @@ function pageUpdateHUD(hudData) {
   if (statsEl) {
     const limitStr = hudData.surrenderAtRound > 9999 ? 'NIGDY (Wygrywa)' : `${hudData.surrenderAtRound}`;
     statsEl.innerHTML =
-      `🏆 Wygrane gry: <b>${hudData.gamesWon}</b> (Gra #${hudData.gameNumber})<br>` +
+      `🏆 Wygrane: <b>${hudData.gamesWon}</b> (Gra #${hudData.gameNumber}) | 🪙 Monety: <b style="color:#facc15;">${hudData.coinsEarned}</b><br>` +
       `🎲 Rundy tego bota: <b>${hudData.rounds}</b> / ${limitStr}<br>` +
       `📊 Rundy B1 / B2: <b>${hudData.bot1Rounds}/${hudData.bot1Limit}</b> | <b>${hudData.bot2Rounds}/${hudData.bot2Limit}</b>`;
   }
@@ -435,6 +453,7 @@ function pageUpdateHUD(hudData) {
     paused: !!window.__rbState.paused,
     forceNewRoom: !!window.__rbState.forceNewRoom,
     forceSurrender: !!window.__rbState.forceSurrender,
+    newlyEarnedCoins,
   };
   window.__rbState.forceNewRoom = false;
   window.__rbState.forceSurrender = false;
@@ -468,7 +487,6 @@ function pageClickCreatePrivateGame() {
 
   candidates.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length);
 
-  // Zamykanie ewentualnych banerów cookies / reklam
   for (const b of candidates) {
     const t = (b.innerText || b.textContent || '').trim().toLowerCase();
     if (t === 'accept' || t === 'agree' || t === 'zgadzam się' || t === 'zaakceptuj') {
@@ -547,7 +565,6 @@ function pageLobbyTick(params) {
       return regex.test(txt);
     });
 
-  // Sprawdzenie czy strona nadal wyświetla "Loading game..."
   const bodyText = document.body ? document.body.innerText : '';
   if (/loading game/i.test(bodyText) && !findClickable(/enter game|join game|start game|change appearance/i)) {
     return { action: 'loading_game', isSeatedInLobby: false };
@@ -777,7 +794,7 @@ function pageGameplayTick(params) {
     return { event: 'passed_auction' };
   }
 
-  // 4. Obsługa poddania się (Bankrupt) dla BOT 1 (>= 100 rund) oraz BOT 2 (>= 120 rund)
+  // 4. Obsługa poddania się (Bankrupt) dla BOT 1 (>= 35 rund) oraz BOT 2 (>= 45 rund)
   const bankruptBtns = buttons.filter((b) => {
     const txt = (b.innerText || b.textContent || '').replace(/\s+/g, ' ').trim();
     return /^(confirm|yes|bankrupt|declare bankruptcy|surrender|potwierdź|tak|zbankrutuj|poddaj się)$/i.test(txt);
@@ -850,13 +867,14 @@ class RichupOrchestrator {
     this.state = 'INIT'; // INIT -> CREATE_ROOM -> WAIT_HOST_SEATED -> WAIT_BOTS_JOIN -> PLAYING -> NEXT_GAME
     this.roomUrl = null;
     this.gamesWon = 0;
+    this.coinsEarned = 0;
     this.gameNumber = 1;
     this.gameStartTime = Date.now();
     this.stateEnteredAt = Date.now();
   }
 
   setState(newState) {
-    console.log(`\n=== [STAN BOTA] ${this.state} -> ${newState} (Gra #${this.gameNumber}, Wygrane: ${this.gamesWon}) ===`);
+    console.log(`\n=== [STAN BOTA] ${this.state} -> ${newState} (Gra #${this.gameNumber}, Wygrane: ${this.gamesWon}, Monety: ${this.coinsEarned}) ===`);
     this.state = newState;
     this.stateEnteredAt = Date.now();
   }
@@ -865,8 +883,8 @@ class RichupOrchestrator {
     console.log('==============================================================');
     console.log('  RICHUP.IO BOT NOCNY (3 OKNA: HOST + 2 BOTY GOŚCIE)');
     console.log('  - Host wchodzi do pokoju jako pierwszy (gwarancja 👑 Hosta)');
-    console.log('  - Bot 1 poddaje się po 100 rundach');
-    console.log('  - Bot 2 poddaje się po 120 rundach');
+    console.log('  - Bot 1 poddaje się po 35 rundach');
+    console.log('  - Bot 2 poddaje się po 45 rundach');
     console.log('==============================================================\n');
 
     for (const client of this.clients) {
@@ -897,6 +915,7 @@ class RichupOrchestrator {
           roleId: c.cfg.id,
           name: c.cfg.name,
           gamesWon: this.gamesWon,
+          coinsEarned: this.coinsEarned,
           gameNumber: this.gameNumber,
           rounds: c.rounds,
           surrenderAtRound: c.cfg.surrenderAtRound === Infinity ? 999999 : c.cfg.surrenderAtRound,
@@ -909,12 +928,15 @@ class RichupOrchestrator {
 
         if (hudRes?.paused) anyPaused = true;
         if (hudRes?.forceNewRoom) forceNewRoom = true;
+        if (hudRes?.newlyEarnedCoins > 0) {
+          this.coinsEarned += hudRes.newlyEarnedCoins;
+          console.log(`[HOST] 🪙 +${hudRes.newlyEarnedCoins} Coin! Łącznie zdobyte monety w tej sesji: ${this.coinsEarned}`);
+        }
         if (hudRes?.forceSurrender && c.cfg.id !== 'host') {
           c.rounds = c.cfg.surrenderAtRound;
           c.lastAction = 'Wymuszono poddanie!';
         }
 
-        // Sprawdzamy czy na którymkolwiek oknie pojawił się Cloudflare Turnstile ("Potwierdź, że jesteś człowiekiem")
         await c.checkAndSolveTurnstile();
       } catch (_) {}
     }
@@ -929,7 +951,6 @@ class RichupOrchestrator {
       return;
     }
 
-    // Watchdog: jeśli tworzenie pokoju / lobby wisi ponad 3 minuty, zrestartuj pokój
     const timeInState = Date.now() - this.stateEnteredAt;
     if (
       (this.state === 'CREATE_ROOM' || this.state === 'WAIT_HOST_SEATED' || this.state === 'WAIT_BOTS_JOIN') &&
@@ -940,7 +961,7 @@ class RichupOrchestrator {
       return;
     }
     if (this.state === 'PLAYING' && Date.now() - this.gameStartTime > CONFIG.maxGameDurationMs) {
-      console.log('[WATCHDOG] Gra przekroczyła 35 minut. Zakładam nowy pokój...');
+      console.log('[WATCHDOG] Gra przekroczyła 25 minut. Zakładam nowy pokój...');
       this.setState('CREATE_ROOM');
       return;
     }
@@ -995,10 +1016,6 @@ class RichupOrchestrator {
     }
   }
 
-  /**
-   * KROK KRYTYCZNY: Najpierw TYLKO Host wchodzi do pokoju i siada przy stole.
-   * Dopiero gdy Host ma koronę 👑 i przycisk Start Game, wpuszczamy Bot 1 i Bot 2!
-   */
   async handleWaitHostSeated() {
     const res = await this.host.eval(pageLobbyTick, {
       isHost: true,
@@ -1140,6 +1157,7 @@ class RichupOrchestrator {
         case 'game_over':
           console.log(`[${c.cfg.name}] 🏆 Wykryto koniec gry! Twoje główne konto wygrywa!`);
           this.gamesWon++;
+          await sleep(4000);
           this.setState('NEXT_GAME');
           return;
         default:
