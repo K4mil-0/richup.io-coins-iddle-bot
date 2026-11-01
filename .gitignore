@@ -1,0 +1,7 @@
+# Wykluczenie profili przeglądarki (zawierają Twoje ciasteczka i sesję logowania!)
+profiles/
+bot.pid
+*.log
+node_modules/
+.DS_Store
+Thumbs.db

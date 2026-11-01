@@ -1,0 +1,13 @@
+{
+  "name": "richup-bot",
+  "version": "1.0.0",
+  "description": "Automatyczny bot nocny do gry Richup.io (Host + 2 boty-goście) oparty o natywny Chrome DevTools Protocol (CDP)",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "license": "MIT"
+}
