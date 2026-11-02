@@ -1,17 +1,19 @@
 /**
- * Richup.io Overnight Coin Farming Bot (MAX PROFIT EDITION)
+ * Richup.io Overnight Coin Farming Bot (MAX PROFIT EDITION v2)
  * Architektura:
  *  - Okno 1 (HOST): Twoje główne konto (zapisana sesja w profiles/host) - ZAWSZE WYGRYWA
- *  - Okno 2 (BOT 1): Konto gościa (profiles/bot1) - nowe ID co grę, poddaje się po 35 rundach
- *  - Okno 3 (BOT 2): Konto gościa (profiles/bot2) - nowe ID co grę, poddaje się po 45 rundach
+ *  - Okno 2 (BOT 1): Konto gościa (profiles/bot1) - poddaje się po 35 rundach
+ *  - Okno 3 (BOT 2): Konto gościa (profiles/bot2) - poddaje się po 45 rundach
  *
- * Optymalizacje pod maksymalny zysk monet:
- *  1. Domyślne zasady gry ($1500) - brak blokady monet za modyfikację zasad (Custom Rules).
- *  2. Inteligentny bufor gotówki - każdy bot kupuje do 5 pól (do $280), dzięki czemu zawsze ma
- *     ponad $800-$1500 zapasu i NIGDY nie zbankrutuje przypadkowo przed 35/45 rundą.
- *  3. Czyszczenie ciasteczek i Storage gości co mecz - w każdej grze BOT 1 i BOT 2 mają nowe ID
- *     i nowy losowy nick (ochrona przed blokadą Anti-Win-Trading za grę z tymi samymi osobami).
- *  4. Szybki czas reakcji (450ms) - maksymalna liczba pełnych gier na godzinę.
+ * Kluczowe mechanizmy gwarantujące naliczanie monet (Coins):
+ *  1. Konwersja pokoju na PUBLICZNY (3/3 graczy) tuż przed startem:
+ *     - Host tworzy pokój prywatny i ustawia "Maximum players" na 3.
+ *     - Bot 1 i Bot 2 wchodzą z linku (pokój zapełnia się 3/3, więc nikt obcy nie wejdzie).
+ *     - Tuż przed kliknięciem "Start Game" Host wyłącza "Private room" (klika "Make public"),
+ *       dzięki czemu serwer traktuje mecz jako 100% PUBLICZNY mecz na domyślnych zasadach!
+ *  2. Obsługa wyboru pionka przez dokładny selektor z kodu gry: button[aria-label^="Select appearance"]
+ *     (gdy kolor jest zajęty i przycisk Join game jest zablokowany, bot wybiera wolny kolor).
+ *  3. Automatyczne zamykanie wyskakującego okienka RODO ("Consent").
  */
 
 const { spawn } = require('child_process');
@@ -37,7 +39,7 @@ try {
 const CONFIG = {
   bot1SurrenderRound: 35,  // Bot 1 poddaje się po 35 swoich rundach
   bot2SurrenderRound: 45,  // Bot 2 poddaje się po 45 swoich rundach
-  maxPropertiesPerBot: 5,  // Maks. liczba kupionych pól na bota (gwarantuje bezpieczny zapas gotówki przy domyślnych $1500)
+  maxPropertiesPerBot: 5,  // Maks. liczba kupionych pól na bota (bezpieczny zapas gotówki przy domyślnych $1500)
   maxPropertyPrice: 280,   // Kupuj tylko pola o cenie <= $280
   tickIntervalMs: 450,     // Szybkie sprawdzanie stanu gry (450ms)
   maxGameDurationMs: 22 * 60 * 1000, // Watchdog: max 22 minuty na jedną grę
@@ -61,7 +63,7 @@ const CONFIG = {
       windowPos: '640,0',
       windowSize: '640,900',
       surrenderAtRound: 35,
-      preferredColorIndex: 2,
+      preferredColorIndex: 3,
     },
     {
       id: 'bot2',
@@ -71,7 +73,7 @@ const CONFIG = {
       windowPos: '1280,0',
       windowSize: '640,900',
       surrenderAtRound: 45,
-      preferredColorIndex: 5,
+      preferredColorIndex: 7,
     },
   ],
 };
@@ -169,7 +171,6 @@ class BrowserClient {
         try {
           await this.send('Page.enable');
           await this.send('Runtime.enable');
-          await this.send('Network.enable').catch(() => {});
           resolve();
         } catch (err) {
           reject(err);
@@ -252,25 +253,17 @@ class BrowserClient {
   }
 
   /**
-   * Czyści tożsamość gościa (ciasteczka, localStorage, sessionStorage) dla BOT 1 i BOT 2,
-   * aby serwer Richup.io w każdym meczu widział zupełnie nowych graczy (brak blokady Anti-Win-Trading!)
+   * Odświeża nick gościa bez kasowania ciasteczek RODO/reklam Google (dzięki czemu nie wyskakuje reklama wideo ani okienko RODO!)
    */
   async resetGuestIdentity() {
-    if (this.cfg.id === 'host') return; // NIGDY nie czyścimy konta Hosta!
+    if (this.cfg.id === 'host') return;
     try {
-      await this.ensureConnected();
-      await this.send('Network.clearBrowserCookies').catch(() => {});
-      await this.send('Storage.clearDataForOrigin', {
-        origin: 'https://richup.io',
-        storageTypes: 'cookies,local_storage,session_storage,indexeddb',
-      }).catch(() => {});
       await this.eval(() => {
         try {
-          localStorage.clear();
+          localStorage.removeItem('PLAYER_NAME');
           sessionStorage.clear();
         } catch (_) {}
       }).catch(() => {});
-      console.log(`[${this.cfg.name}] 🔄 Wygenerowano nową tożsamość gościa (nowe ID gracza na kolejny mecz).`);
     } catch (_) {}
   }
 
@@ -499,6 +492,13 @@ function pageClickCreatePrivateGame() {
     el.click();
   };
 
+  // 1. Zamykanie okienka RODO ("Consent" / "Zgadzam się")
+  const gdprBtn = document.querySelector('.fc-cta-consent, button.fc-primary-button');
+  if (gdprBtn && isVisible(gdprBtn)) {
+    smartClick(gdprBtn);
+    return { clicked: false, gdprClicked: true };
+  }
+
   const candidates = Array.from(document.querySelectorAll('button, [role="button"], a, div')).filter((el) => {
     if (!isVisible(el) || el.disabled || el.closest('#richup-bot-hud')) return false;
     const txt = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
@@ -509,7 +509,7 @@ function pageClickCreatePrivateGame() {
 
   for (const b of candidates) {
     const t = (b.innerText || b.textContent || '').trim().toLowerCase();
-    if (t === 'accept' || t === 'agree' || t === 'zgadzam się' || t === 'zaakceptuj') {
+    if (t === 'consent' || t === 'accept' || t === 'agree' || t === 'zgadzam się' || t === 'zaakceptuj') {
       smartClick(b);
     }
   }
@@ -538,12 +538,16 @@ function pageClickCreatePrivateGame() {
 }
 
 /**
- * Obsługa lobby: przechodzenie przez "Enter Game" -> "Select appearance" -> "Join game" -> "Start Game"
- * UWAGA: Zostawiamy w 100% DOMYŚLNE ZASADY GRY ($1500 na start, brak aukcji),
- * ponieważ serwer Richup.io wymaga domyślnych zasad (Default Rules), aby przyznać monetę za wygraną!
+ * Obsługa lobby:
+ *  1. Zamyka okienko RODO ("Consent") jeśli wyskoczyło.
+ *  2. Klika ">> Enter Game".
+ *  3. Wybiera wolny wygląd pionka (button[aria-label^="Select appearance"]:not(:disabled)) i klika "Join game".
+ *  4. U Hosta ustawia "Maximum players" = 3 (żeby pokój był pełny 3/3 po wejściu 2 botów).
+ *  5. Gdy wszystkie 3 okna siedzą przy stole (allJoined === true), Host wyłącza "Private room" (klika "Make public"),
+ *     zamieniając pełny pokój 3/3 w pokój PUBLICZNY (dzięki czemu serwer przyznaje monety za wygraną!) i klika "Start Game".
  */
 function pageLobbyTick(params) {
-  const { preferredColorIndex, allJoined } = params;
+  const { isHost, preferredColorIndex, allJoined } = params;
 
   const isVisible = (el) => {
     if (!el) return false;
@@ -561,10 +565,23 @@ function pageLobbyTick(params) {
     el.click();
   };
 
-  const getClickableElements = () => {
+  // KROK 0: Natychmiastowe zamykanie okienka RODO ("richup.io asks for your consent..." -> przycisk "Consent")
+  const gdprBtn =
+    document.querySelector('.fc-cta-consent, button.fc-primary-button') ||
+    Array.from(document.querySelectorAll('button, [role="button"], span, div')).find((el) => {
+      if (!isVisible(el) || el.closest('#richup-bot-hud')) return false;
+      const t = (el.innerText || el.textContent || '').trim();
+      return /^(consent|do not consent|accept all|zgadzam się)$/i.test(t) && el.tagName === 'BUTTON';
+    });
+  if (gdprBtn && isVisible(gdprBtn)) {
+    smartClick(gdprBtn);
+    return { action: 'gdpr_consent_clicked', isSeatedInLobby: false };
+  }
+
+  const getClickableElements = (includeDisabled = false) => {
     const all = Array.from(document.querySelectorAll('button, [role="button"], a, div, span'));
     const filtered = all.filter((el) => {
-      if (!isVisible(el) || el.disabled || el.closest('#richup-bot-hud')) return false;
+      if (!isVisible(el) || (!includeDisabled && el.disabled) || el.closest('#richup-bot-hud')) return false;
       const txt = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
       if (!txt || txt.length > 40) return false;
       const tag = el.tagName.toLowerCase();
@@ -580,7 +597,7 @@ function pageLobbyTick(params) {
     return filtered;
   };
 
-  const clickables = getClickableElements();
+  const clickables = getClickableElements(false);
   const findClickable = (regex) =>
     clickables.find((el) => {
       const txt = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
@@ -599,30 +616,36 @@ function pageLobbyTick(params) {
     return { action: 'enter_game_clicked', label: (enterGameBtn.innerText || '').trim(), isSeatedInLobby: false };
   }
 
-  // KROK 2: Ekran wyboru wyglądu pionka ("Select your player appearance:" + przycisk "Join game ->")
-  const joinGameBtn = findClickable(/join game|dołącz do gry/i);
-  if (joinGameBtn) {
-    if (/select your player appearance|wybierz wygląd/i.test(bodyText)) {
-      const joinRect = joinGameBtn.getBoundingClientRect();
-      const circles = Array.from(document.querySelectorAll('div, button, span')).filter((el) => {
-        if (!isVisible(el) || el.closest('#richup-bot-hud')) return false;
-        const r = el.getBoundingClientRect();
-        const isSquare = Math.abs(r.width - r.height) <= 6 && r.width >= 28 && r.width <= 70;
-        const isAboveJoin = r.bottom < joinRect.top && r.top > joinRect.top - 320;
-        const style = getComputedStyle(el);
-        const isRound = style.borderRadius.includes('50%') || parseInt(style.borderRadius, 10) >= 14;
-        return isSquare && isAboveJoin && isRound && style.cursor === 'pointer';
-      });
+  // KROK 2: Ekran wyboru wyglądu pionka ("Select your player appearance:" + kółka button[aria-label^="Select appearance"])
+  // UWAGA: Gdy kolor jest zajęty przez innego gracza, Richup.io ustawia przycisk "Join game" jako disabled!
+  // Dlatego sprawdzamy przyciski wyboru wyglądu NIEZALEŻNIE od tego, czy "Join game" jest aktywny!
+  const appearanceBtns = Array.from(document.querySelectorAll('button[aria-label^="Select appearance"]')).filter(
+    (b) => isVisible(b) && !b.disabled
+  );
+  const anyJoinBtn = getClickableElements(true).find((el) =>
+    /^(join game|dołącz do gry)$/i.test((el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim())
+  );
 
-      if (circles.length > 0) {
-        window.__rbColorTry = (window.__rbColorTry || 0) + 1;
-        const idx = ((preferredColorIndex || 0) + window.__rbColorTry) % circles.length;
-        smartClick(circles[idx]);
-      }
+  if (appearanceBtns.length > 0 || anyJoinBtn) {
+    // Jeśli przycisk "Join game" jest zablokowany (disabled) lub pojawił się komunikat "Someone is already using this appearance",
+    // musimy najpierw kliknąć dostępne kółko z wyglądem pionka!
+    const enabledJoinBtn = findClickable(/^(join game|dołącz do gry)$/i);
+    if (!enabledJoinBtn && appearanceBtns.length > 0) {
+      window.__rbColorTry = (window.__rbColorTry || 0) + 1;
+      const idx = ((preferredColorIndex || 0) + window.__rbColorTry) % appearanceBtns.length;
+      const chosenCircle = appearanceBtns[idx];
+      smartClick(chosenCircle);
+      return {
+        action: 'appearance_selected',
+        label: chosenCircle.getAttribute('aria-label') || 'kolor',
+        isSeatedInLobby: false,
+      };
     }
 
-    smartClick(joinGameBtn);
-    return { action: 'join_clicked', label: (joinGameBtn.innerText || '').trim(), isSeatedInLobby: false };
+    if (enabledJoinBtn) {
+      smartClick(enabledJoinBtn);
+      return { action: 'join_clicked', label: (enabledJoinBtn.innerText || '').trim(), isSeatedInLobby: false };
+    }
   }
 
   // KROK 3: Sprawdzenie czy gracz faktycznie siedzi już przy stole w pokoju
@@ -630,14 +653,68 @@ function pageLobbyTick(params) {
   const startGameBtn = findClickable(/start game|rozpocznij grę/i);
   const isSeatedInLobby = !!changeAppearanceBtn || !!startGameBtn;
 
-  // KROK 4: Sprawdzenie czy gra już wystartowała
+  // KROK 4 (HOST): Ustawienie "Maximum players" na 3 oraz wyłączenie "Allow bots to join",
+  // aby po wejściu Hosta + Bot 1 + Bot 2 pokój był w 100% pełny (3/3)
+  if (isHost && isSeatedInLobby) {
+    const selects = Array.from(document.querySelectorAll('select')).filter((s) => !s.disabled);
+    for (const sel of selects) {
+      const optValues = Array.from(sel.options).map((o) => o.value);
+      // Select dla Maximum players ma opcje "2", "3", "4"
+      if (optValues.includes('2') && optValues.includes('3') && optValues.includes('4') && sel.value !== '3') {
+        sel.value = '3';
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
+        return { action: 'max_players_set_3', isSeatedInLobby: true };
+      }
+    }
+
+    // Wyłączenie "Allow bots to join" jeśli jest włączone
+    const botToggle = document.querySelector('[aria-label="Allow bots to join"]');
+    if (botToggle && !botToggle.disabled) {
+      const isOn =
+        botToggle.checked === true ||
+        botToggle.getAttribute('aria-checked') === 'true' ||
+        botToggle.classList.contains('active');
+      if (isOn) {
+        smartClick(botToggle);
+        return { action: 'bots_disabled', isSeatedInLobby: true };
+      }
+    }
+  }
+
+  // KROK 5: Sprawdzenie czy gra już wystartowała
   const inGameIndicator = findClickable(/^(roll the dice|roll again|end turn|rzuć kostką|zakończ turę)$/i);
   if (inGameIndicator && !startGameBtn) {
     return { action: 'game_already_started', isSeatedInLobby: true };
   }
 
-  // KROK 5: Kliknięcie "Start Game" (gdy wszystkie 3 okna siedzą przy stole)
-  if (startGameBtn && allJoined) {
+  // KROK 6 (KLUCZ DO MONET!): Gdy wszystkie 3 okna siedzą przy stole (3/3),
+  // Host przełącza pokój z "Private room" na PUBLICZNY ("Make public") i od razu klika "Start Game"!
+  if (isHost && startGameBtn && allJoined) {
+    // 6A. Jeśli otwarte jest okienko potwierdzenia "Make public", kliknij "Make public"
+    const makePublicBtn = findClickable(/^make public$/i);
+    if (makePublicBtn) {
+      smartClick(makePublicBtn);
+      window.__rbMadePublic = true;
+      return { action: 'made_room_public', isSeatedInLobby: true };
+    }
+
+    // 6B. Jeśli pokój nadal jest prywatny, kliknij przełącznik obok "Private room"
+    if (!window.__rbMadePublic) {
+      const allDivs = Array.from(document.querySelectorAll('div, span, label'));
+      const privLabel = allDivs.find((el) => (el.textContent || '').trim().startsWith('Private room'));
+      if (privLabel && privLabel.parentElement) {
+        const settingRow = privLabel.parentElement.parentElement || privLabel.parentElement;
+        const switchEl = settingRow.querySelector('input[type="checkbox"], button, [role="switch"]');
+        if (switchEl && !switchEl.disabled) {
+          smartClick(switchEl);
+          window.__rbMadePublic = true;
+          return { action: 'toggled_private_room', isSeatedInLobby: true };
+        }
+      }
+      window.__rbMadePublic = true;
+    }
+
+    // 6C. Klikamy "Start Game"!
     smartClick(startGameBtn);
     return { action: 'start_clicked', isSeatedInLobby: true };
   }
@@ -706,7 +783,13 @@ function pageGameplayTick(params) {
     }
   }
 
-  // 1. Gdyby okno wciąż miało niezamknięty "Start Game", kliknij go
+  // 1. Gdyby okno wciąż miało niezamknięty "Make public" lub "Start Game", kliknij go
+  const makePublicBtn = findBtn(/^make public$/i);
+  if (makePublicBtn) {
+    smartClick(makePublicBtn);
+    return { event: 'clicked_make_public' };
+  }
+
   const startGameBtn = findBtn(/^start game$/i);
   if (startGameBtn) {
     smartClick(startGameBtn);
@@ -755,7 +838,6 @@ function pageGameplayTick(params) {
       if (b.querySelector('[data-icon="arrow-up-from-line"]')) return false;
       if (!/^(buy for \$|buy\b|kup za|kup\b)/i.test(txt)) return false;
 
-      // Sprawdzamy cenę pola z tekstu przycisku (np. "Buy for $200")
       const priceMatch = txt.match(/\$(\d+)/);
       if (priceMatch) {
         const price = parseInt(priceMatch[1], 10);
@@ -808,7 +890,7 @@ class RichupOrchestrator {
     this.bot1 = this.clients[1];
     this.bot2 = this.clients[2];
 
-    this.state = 'INIT'; // INIT -> CREATE_ROOM -> WAIT_HOST_SEATED -> WAIT_BOTS_JOIN -> PLAYING -> NEXT_GAME
+    this.state = 'INIT';
     this.roomUrl = null;
     this.gamesWon = 0;
     this.coinsEarned = 0;
@@ -825,9 +907,10 @@ class RichupOrchestrator {
 
   async start() {
     console.log('==============================================================');
-    console.log('  RICHUP.IO BOT NOCNY - MAX COIN PROFIT EDITION');
-    console.log('  - Domyślne zasady ($1500) + inteligentny bufor gotówki (max 5 pól)');
-    console.log('  - Nowa tożsamość gości (BOT 1 & BOT 2) w każdym meczu');
+    console.log('  RICHUP.IO BOT NOCNY - MAX COIN PROFIT EDITION v2');
+    console.log('  - Pokój 3/3 automatycznie przełączany na PUBLICZNY przed startem');
+    console.log('  - Automatyczny wybór wolnego koloru pionka (aria-label)');
+    console.log('  - Automatyczne zamykanie zgód RODO (Consent)');
     console.log('  - Bot 1 poddaje się po 35 rundach | Bot 2 po 45 rundach');
     console.log('==============================================================\n');
 
@@ -930,7 +1013,6 @@ class RichupOrchestrator {
     for (const c of this.clients) c.resetForNewGame();
     this.roomUrl = null;
 
-    // Przed każdym nowym meczem czyścimy tożsamość gości (BOT 1 i BOT 2), aby serwer widział nowych graczy!
     await this.bot1.resetGuestIdentity();
     await this.bot2.resetGuestIdentity();
 
@@ -958,7 +1040,7 @@ class RichupOrchestrator {
       console.log(`[HOST] Wygenerowano link pokoju: ${this.roomUrl}`);
       console.log(`[HOST] Czekam aż HOST wejdzie do środka jako pierwszy (żeby miał 👑 Hosta)...`);
 
-      await this.host.eval('window.__rbColorTry = 0;');
+      await this.host.eval('window.__rbColorTry = 0; window.__rbMadePublic = false;');
 
       this.setState('WAIT_HOST_SEATED');
     }
@@ -976,8 +1058,12 @@ class RichupOrchestrator {
       return;
     }
 
-    if (res?.action === 'enter_game_clicked') {
+    if (res?.action === 'gdpr_consent_clicked') {
+      this.host.lastAction = 'Zaakceptowano RODO (Consent)...';
+    } else if (res?.action === 'enter_game_clicked') {
       this.host.lastAction = `Kliknięto "${res.label}"...`;
+    } else if (res?.action === 'appearance_selected') {
+      this.host.lastAction = `Wybrano wolny kolor (${res.label})...`;
     } else if (res?.action === 'join_clicked') {
       this.host.lastAction = `Dołączam jako Host ("${res.label}")...`;
     }
@@ -1025,12 +1111,24 @@ class RichupOrchestrator {
 
       if (res?.action === 'loading_game') {
         c.lastAction = 'Ładowanie gry (Loading game)...';
+      } else if (res?.action === 'gdpr_consent_clicked') {
+        c.lastAction = 'Zaakceptowano okienko RODO (Consent)!';
+        console.log(`[${c.cfg.name}] Kliknięto przycisk RODO (Consent)`);
       } else if (res?.action === 'enter_game_clicked') {
         c.lastAction = `Kliknięto "${res.label}"...`;
         console.log(`[${c.cfg.name}] Kliknięto przycisk wejścia: "${res.label}"`);
+      } else if (res?.action === 'appearance_selected') {
+        c.lastAction = `Wybrano wolny kolor (${res.label})...`;
+        console.log(`[${c.cfg.name}] 🎨 Wybrano wolny kolor pionka: ${res.label}`);
       } else if (res?.action === 'join_clicked') {
-        c.lastAction = `Wybieram kolor i klikam "${res.label}"...`;
+        c.lastAction = `Kliknięto "${res.label}"...`;
         console.log(`[${c.cfg.name}] Kliknięto dołączenie: "${res.label}"`);
+      } else if (res?.action === 'max_players_set_3') {
+        c.lastAction = 'Ustawiono Maximum players = 3!';
+        console.log('[HOST] ⚙️ Ustawiono Maximum players = 3 (pokój 3-osobowy)');
+      } else if (res?.action === 'toggled_private_room' || res?.action === 'made_room_public') {
+        c.lastAction = 'Przełączono pokój 3/3 na PUBLICZNY (pod monety)!';
+        console.log('[HOST] 🌐 Przełączono pełny pokój 3/3 na PUBLICZNY (isPrivate = false)!');
       } else if (res?.action === 'start_clicked') {
         c.lastAction = 'Rozpoczynam grę (Start Game)!';
         console.log(`[${c.cfg.name}] 🚀 Wszyscy 3 gracze przy stole! Kliknięto Start Game!`);
@@ -1046,7 +1144,7 @@ class RichupOrchestrator {
       } else if (!c.joinedLobby) {
         c.lastAction = 'Wchodzę do gry (Enter / Join)...';
       } else {
-        c.lastAction = allJoined ? 'Klikam Start Game...' : 'Czekam na pozostałe boty...';
+        c.lastAction = allJoined ? 'Upubliczniam pokój 3/3 i klikam Start...' : 'Czekam na pozostałe boty...';
       }
     }
   }
