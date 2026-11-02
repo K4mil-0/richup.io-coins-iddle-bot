@@ -812,10 +812,18 @@ function pageGameplayTick(params) {
     el.click();
   };
 
+  // Przycisk jest nieaktywny, jeśli ma disabled LUB aria-disabled="true" (Richup często używa aria-disabled z tooltipem!)
+  const isDisabledEl = (el) =>
+    !!el.disabled ||
+    el.getAttribute('aria-disabled') === 'true' ||
+    !!el.closest('[aria-disabled="true"], button:disabled');
+
   const getClickableElements = () => {
     const all = Array.from(document.querySelectorAll('button, [role="button"], a, div, span'));
     const filtered = all.filter((el) => {
-      if (!isVisible(el) || el.disabled || el.closest('#richup-bot-hud')) return false;
+      if (!isVisible(el) || isDisabledEl(el) || el.closest('#richup-bot-hud')) return false;
+      // Pomijaj wrappery (div/span), które w środku zawierają nieaktywny przycisk
+      if (el.tagName !== 'BUTTON' && el.querySelector('button:disabled, button[aria-disabled="true"]')) return false;
       const txt = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
       if (!txt || txt.length > 45) return false;
       const tag = el.tagName.toLowerCase();
@@ -900,26 +908,30 @@ function pageGameplayTick(params) {
     return { event: 'already_bankrupt' };
   }
 
-  // 5. Kupowanie wszystkich nieruchomości, na których stanie gracz (pola miast/lotnisk/elektrowni)
-  const buyBtn = buttons.find((b) => {
-    const txt = (b.innerText || b.textContent || '').replace(/\s+/g, ' ').trim();
-    if (/house|hotel|upgrade|build|dom|ulepsz|buduj/i.test(txt)) return false;
-    if (b.querySelector('[data-icon="arrow-up-from-line"]')) return false;
-    return /^(buy for \$|buy\b|kup za|kup\b)/i.test(txt);
-  });
+  // 5. Kupowanie nieruchomości, na których stanie gracz (TYLKO prawdziwy, aktywny <button> "Buy for $...")
+  //    ZABEZPIECZENIE: jeśli kliknięto "Buy" 3 razy z rzędu i nic się nie zmieniło (nie stać nas na pole),
+  //    przestajemy klikać "Buy" na 10 sekund i przechodzimy do "End turn" (jedziemy dalej).
+  const buySkipActive = Date.now() < (window.__rbBuySkipUntil || 0);
+  const buyBtn = buySkipActive
+    ? null
+    : buttons.find((b) => {
+        if (b.tagName !== 'BUTTON') return false;
+        const txt = (b.innerText || b.textContent || '').replace(/\s+/g, ' ').trim();
+        if (/house|hotel|upgrade|build|dom|ulepsz|buduj/i.test(txt)) return false;
+        if (b.querySelector('[data-icon="arrow-up-from-line"]')) return false;
+        return /^(buy for \$|buy\b|kup za|kup\b)/i.test(txt);
+      });
   if (buyBtn) {
-    smartClick(buyBtn);
-    return { event: 'bought_property', label: (buyBtn.innerText || '').trim() };
-  }
-
-  // 5B. OCHRONA PRZED TIMEOUTEM NA DROGIM POLU:
-  //     Jeśli gracz stanął na niekupionym polu, na które go NIE stać (przycisk "Buy for $..." jest disabled),
-  //     Richup ukrywa przycisk "End turn" i wyświetla w jego miejscu wyłącznie przycisk "Auction"!
-  //     Bez kliknięcia "Auction" zegar tury (60s) wygasa i wyrzuca gracza z gry!
-  const startAuctionBtn = findBtn(/^(auction|aukcja)$/i);
-  if (startAuctionBtn) {
-    smartClick(startAuctionBtn);
-    return { event: 'started_auction_when_cant_afford' };
+    window.__rbBuyClicks = (window.__rbBuyClicks || 0) + 1;
+    if (window.__rbBuyClicks > 3) {
+      window.__rbBuyClicks = 0;
+      window.__rbBuySkipUntil = Date.now() + 10000;
+    } else {
+      smartClick(buyBtn);
+      return { event: 'bought_property', label: (buyBtn.innerText || '').trim() };
+    }
+  } else {
+    window.__rbBuyClicks = 0;
   }
 
   // 5C. OCHRONA HOSTA PRZED UJEMNĄ GOTÓWKĄ (selfMoney < 0 blokuje "End turn"):
@@ -1302,13 +1314,20 @@ class RichupOrchestrator {
             console.log(`[${c.cfg.name}] ✅ Bot jest już oficjalnie wyeliminowany z gry!`);
           }
           break;
-        case 'game_over':
-          console.log(`[${c.cfg.name}] 🏆 Ekran "Game over!" widoczny! Czekam 4.5s na zapis wygranej i monety w profilu...`);
-          this.host.lastAction = '🏆 WYGRANA (Game over)! Zapisywanie w profilu...';
-          this.gamesWon++;
+        case 'game_over': {
+          // Liczymy wygraną tylko wtedy, gdy boty faktycznie się poddały (a nie gdy Host został wyrzucony z gry)
+          const hostWon = this.bot1.surrendered || this.bot2.surrendered || this.host.rounds >= Math.max(this.bot1.rounds, this.bot2.rounds) - 3;
+          console.log(
+            hostWon
+              ? `[${c.cfg.name}] 🏆 Ekran "Game over!" – HOST WYGRAŁ! Czekam 4.5s na zapis wygranej i monety w profilu...`
+              : `[${c.cfg.name}] ⚠️ Ekran "Game over!" – ale Host prawdopodobnie odpadł (rundy Host: ${this.host.rounds}, B1: ${this.bot1.rounds}, B2: ${this.bot2.rounds}).`
+          );
+          this.host.lastAction = hostWon ? '🏆 WYGRANA (Game over)! Zapisywanie w profilu...' : '⚠️ Gra zakończona bez wygranej Hosta';
+          if (hostWon) this.gamesWon++;
           await sleep(4500);
           this.setState('NEXT_GAME');
           return;
+        }
         default:
           break;
       }
