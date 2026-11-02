@@ -1,19 +1,15 @@
 /**
- * Richup.io Overnight Coin Farming Bot (MAX PROFIT EDITION v2)
+ * Richup.io Overnight Coin Farming Bot
  * Architektura:
  *  - Okno 1 (HOST): Twoje główne konto (zapisana sesja w profiles/host) - ZAWSZE WYGRYWA
- *  - Okno 2 (BOT 1): Konto gościa (profiles/bot1) - poddaje się po 35 rundach
- *  - Okno 3 (BOT 2): Konto gościa (profiles/bot2) - poddaje się po 45 rundach
+ *  - Okno 2 (BOT 1): Konto gościa (profiles/bot1) - poddaje się po 100 rundach
+ *  - Okno 3 (BOT 2): Konto gościa (profiles/bot2) - poddaje się po 120 rundach
  *
- * Kluczowe mechanizmy gwarantujące naliczanie monet (Coins):
- *  1. Konwersja pokoju na PUBLICZNY (3/3 graczy) tuż przed startem:
- *     - Host tworzy pokój prywatny i ustawia "Maximum players" na 3.
- *     - Bot 1 i Bot 2 wchodzą z linku (pokój zapełnia się 3/3, więc nikt obcy nie wejdzie).
- *     - Tuż przed kliknięciem "Start Game" Host wyłącza "Private room" (klika "Make public"),
- *       dzięki czemu serwer traktuje mecz jako 100% PUBLICZNY mecz na domyślnych zasadach!
- *  2. Obsługa wyboru pionka przez dokładny selektor z kodu gry: button[aria-label^="Select appearance"]
- *     (gdy kolor jest zajęty i przycisk Join game jest zablokowany, bot wybiera wolny kolor).
- *  3. Automatyczne zamykanie wyskakującego okienka RODO ("Consent").
+ * Zasady (sprawdzone - naliczają gry w profilu i dają monety):
+ *  - Prywatny pokój z kasą startową $3000 (maksymalna).
+ *  - Wszystkie boty kupują pola, na których staną (bez budowania domków/hoteli).
+ *  - Naprawione potwierdzanie bankructwa w modalu ("File your bankruptcy" -> przycisk obok "Cancel")
+ *    oraz czekanie na prawdziwy ekran "Game over!" przed wyjściem z pokoju.
  */
 
 const { spawn } = require('child_process');
@@ -37,12 +33,10 @@ try {
 
 // ==================== KONFIGURACJA ====================
 const CONFIG = {
-  bot1SurrenderRound: 35,  // Bot 1 poddaje się po 35 swoich rundach
-  bot2SurrenderRound: 45,  // Bot 2 poddaje się po 45 swoich rundach
-  maxPropertiesPerBot: 5,  // Maks. liczba kupionych pól na bota (bezpieczny zapas gotówki przy domyślnych $1500)
-  maxPropertyPrice: 280,   // Kupuj tylko pola o cenie <= $280
-  tickIntervalMs: 450,     // Szybkie sprawdzanie stanu gry (450ms)
-  maxGameDurationMs: 22 * 60 * 1000, // Watchdog: max 22 minuty na jedną grę
+  bot1SurrenderRound: 100, // Bot 1 poddaje się po 100 swoich rundach
+  bot2SurrenderRound: 120, // Bot 2 poddaje się po 120 swoich rundach
+  tickIntervalMs: 600,     // Częstotliwość sprawdzania stanu gry (ms)
+  maxGameDurationMs: 40 * 60 * 1000, // Watchdog: max 40 minut na jedną grę
   chromePath: findChromePath(),
   instances: [
     {
@@ -57,22 +51,22 @@ const CONFIG = {
     },
     {
       id: 'bot1',
-      name: 'BOT 1 (Gość - 35 rund)',
+      name: 'BOT 1 (Gość - 100 rund)',
       port: 9223,
       profileDir: path.join(__dirname, 'profiles', 'bot1'),
       windowPos: '640,0',
       windowSize: '640,900',
-      surrenderAtRound: 35,
+      surrenderAtRound: 100,
       preferredColorIndex: 3,
     },
     {
       id: 'bot2',
-      name: 'BOT 2 (Gość - 45 rund)',
+      name: 'BOT 2 (Gość - 120 rund)',
       port: 9224,
       profileDir: path.join(__dirname, 'profiles', 'bot2'),
       windowPos: '1280,0',
       windowSize: '640,900',
-      surrenderAtRound: 45,
+      surrenderAtRound: 120,
       preferredColorIndex: 7,
     },
   ],
@@ -102,13 +96,10 @@ class BrowserClient {
     this.msgId = 1;
     this.pending = new Map();
     this.rounds = 0;
-    this.propertiesBought = 0;
-    this.surrenderClicks = 0;
     this.surrendered = false;
     this.joinedLobby = false;
     this.lastAction = 'Inicjalizacja...';
     this.lastRollTimestamp = 0;
-    this.lastBuyTimestamp = 0;
     this.lastTurnstileClick = 0;
   }
 
@@ -252,21 +243,6 @@ class BrowserClient {
     await this.send('Page.navigate', { url });
   }
 
-  /**
-   * Odświeża nick gościa bez kasowania ciasteczek RODO/reklam Google (dzięki czemu nie wyskakuje reklama wideo ani okienko RODO!)
-   */
-  async resetGuestIdentity() {
-    if (this.cfg.id === 'host') return;
-    try {
-      await this.eval(() => {
-        try {
-          localStorage.removeItem('PLAYER_NAME');
-          sessionStorage.clear();
-        } catch (_) {}
-      }).catch(() => {});
-    } catch (_) {}
-  }
-
   async nativeMouseClick(x, y) {
     await this.ensureConnected();
     const rx = Math.round(x + (Math.random() * 4 - 2));
@@ -344,13 +320,10 @@ class BrowserClient {
 
   resetForNewGame() {
     this.rounds = 0;
-    this.propertiesBought = 0;
-    this.surrenderClicks = 0;
     this.surrendered = false;
     this.joinedLobby = false;
     this.lastAction = 'Nowa gra...';
     this.lastRollTimestamp = 0;
-    this.lastBuyTimestamp = 0;
   }
 }
 
@@ -453,8 +426,8 @@ function pageUpdateHUD(hudData) {
     const limitStr = hudData.surrenderAtRound > 9999 ? 'NIGDY (Wygrywa)' : `${hudData.surrenderAtRound}`;
     statsEl.innerHTML =
       `🏆 Wygrane: <b>${hudData.gamesWon}</b> (Gra #${hudData.gameNumber}) | 🪙 Monety: <b style="color:#facc15;">${hudData.coinsEarned}</b><br>` +
-      `🎲 Rundy: <b>${hudData.rounds}</b> / ${limitStr} | 🏠 Pola: <b>${hudData.propertiesBought}/${hudData.maxProperties}</b><br>` +
-      `📊 B1 / B2: <b>${hudData.bot1Rounds}/${hudData.bot1Limit}</b> | <b>${hudData.bot2Rounds}/${hudData.bot2Limit}</b>`;
+      `🎲 Rundy tego bota: <b>${hudData.rounds}</b> / ${limitStr}<br>` +
+      `📊 Rundy B1 / B2: <b>${hudData.bot1Rounds}/${hudData.bot1Limit}</b> | <b>${hudData.bot2Rounds}/${hudData.bot2Limit}</b>`;
   }
   if (actionEl) {
     actionEl.textContent = window.__rbState.paused ? '⏸️ WSTRZYMANO (Kliknij Wznów)' : `▶ ${hudData.lastAction}`;
@@ -492,7 +465,7 @@ function pageClickCreatePrivateGame() {
     el.click();
   };
 
-  // 1. Zamykanie okienka RODO ("Consent" / "Zgadzam się")
+  // 1. Zamykanie okienka RODO ("Consent")
   const gdprBtn = document.querySelector('.fc-cta-consent, button.fc-primary-button');
   if (gdprBtn && isVisible(gdprBtn)) {
     smartClick(gdprBtn);
@@ -542,9 +515,8 @@ function pageClickCreatePrivateGame() {
  *  1. Zamyka okienko RODO ("Consent") jeśli wyskoczyło.
  *  2. Klika ">> Enter Game".
  *  3. Wybiera wolny wygląd pionka (button[aria-label^="Select appearance"]:not(:disabled)) i klika "Join game".
- *  4. U Hosta ustawia "Maximum players" = 3 (żeby pokój był pełny 3/3 po wejściu 2 botów).
- *  5. Gdy wszystkie 3 okna siedzą przy stole (allJoined === true), Host wyłącza "Private room" (klika "Make public"),
- *     zamieniając pełny pokój 3/3 w pokój PUBLICZNY (dzięki czemu serwer przyznaje monety za wygraną!) i klika "Start Game".
+ *  4. U Hosta ustawia "Starting cash" na maksymalne $3000 (w prywatnym pokoju).
+ *  5. Gdy wszystkie 3 okna siedzą przy stole (allJoined === true), Host klika "Start Game".
  */
 function pageLobbyTick(params) {
   const { isHost, preferredColorIndex, allJoined } = params;
@@ -565,13 +537,13 @@ function pageLobbyTick(params) {
     el.click();
   };
 
-  // KROK 0: Natychmiastowe zamykanie okienka RODO ("richup.io asks for your consent..." -> przycisk "Consent")
+  // KROK 0: Natychmiastowe zamykanie okienka RODO ("Consent")
   const gdprBtn =
     document.querySelector('.fc-cta-consent, button.fc-primary-button') ||
-    Array.from(document.querySelectorAll('button, [role="button"], span, div')).find((el) => {
+    Array.from(document.querySelectorAll('button, [role="button"]')).find((el) => {
       if (!isVisible(el) || el.closest('#richup-bot-hud')) return false;
       const t = (el.innerText || el.textContent || '').trim();
-      return /^(consent|do not consent|accept all|zgadzam się)$/i.test(t) && el.tagName === 'BUTTON';
+      return /^(consent|accept all|zgadzam się)$/i.test(t);
     });
   if (gdprBtn && isVisible(gdprBtn)) {
     smartClick(gdprBtn);
@@ -617,8 +589,6 @@ function pageLobbyTick(params) {
   }
 
   // KROK 2: Ekran wyboru wyglądu pionka ("Select your player appearance:" + kółka button[aria-label^="Select appearance"])
-  // UWAGA: Gdy kolor jest zajęty przez innego gracza, Richup.io ustawia przycisk "Join game" jako disabled!
-  // Dlatego sprawdzamy przyciski wyboru wyglądu NIEZALEŻNIE od tego, czy "Join game" jest aktywny!
   const appearanceBtns = Array.from(document.querySelectorAll('button[aria-label^="Select appearance"]')).filter(
     (b) => isVisible(b) && !b.disabled
   );
@@ -627,8 +597,6 @@ function pageLobbyTick(params) {
   );
 
   if (appearanceBtns.length > 0 || anyJoinBtn) {
-    // Jeśli przycisk "Join game" jest zablokowany (disabled) lub pojawił się komunikat "Someone is already using this appearance",
-    // musimy najpierw kliknąć dostępne kółko z wyglądem pionka!
     const enabledJoinBtn = findClickable(/^(join game|dołącz do gry)$/i);
     if (!enabledJoinBtn && appearanceBtns.length > 0) {
       window.__rbColorTry = (window.__rbColorTry || 0) + 1;
@@ -653,32 +621,20 @@ function pageLobbyTick(params) {
   const startGameBtn = findClickable(/start game|rozpocznij grę/i);
   const isSeatedInLobby = !!changeAppearanceBtn || !!startGameBtn;
 
-  // KROK 4 (HOST): Ustawienie "Maximum players" na 3 oraz wyłączenie "Allow bots to join",
-  // aby po wejściu Hosta + Bot 1 + Bot 2 pokój był w 100% pełny (3/3)
-  if (isHost && isSeatedInLobby) {
+  // KROK 4 (HOST): Ustawienie maksymalnej kasy startowej ($3000) w "Starting cash"
+  if (isHost && isSeatedInLobby && !window.__rbLobbyConfigured) {
     const selects = Array.from(document.querySelectorAll('select')).filter((s) => !s.disabled);
     for (const sel of selects) {
       const optValues = Array.from(sel.options).map((o) => o.value);
-      // Select dla Maximum players ma opcje "2", "3", "4"
-      if (optValues.includes('2') && optValues.includes('3') && optValues.includes('4') && sel.value !== '3') {
-        sel.value = '3';
+      // Select dla Starting cash ma opcje ["500", "1000", "1500", "2000", "2500", "3000"]
+      if (optValues.includes('1500') && optValues.includes('3000') && sel.value !== '3000') {
+        sel.value = '3000';
         sel.dispatchEvent(new Event('change', { bubbles: true }));
-        return { action: 'max_players_set_3', isSeatedInLobby: true };
+        window.__rbLobbyConfigured = true;
+        return { action: 'starting_cash_set_3000', isSeatedInLobby: true };
       }
     }
-
-    // Wyłączenie "Allow bots to join" jeśli jest włączone
-    const botToggle = document.querySelector('[aria-label="Allow bots to join"]');
-    if (botToggle && !botToggle.disabled) {
-      const isOn =
-        botToggle.checked === true ||
-        botToggle.getAttribute('aria-checked') === 'true' ||
-        botToggle.classList.contains('active');
-      if (isOn) {
-        smartClick(botToggle);
-        return { action: 'bots_disabled', isSeatedInLobby: true };
-      }
-    }
+    window.__rbLobbyConfigured = true;
   }
 
   // KROK 5: Sprawdzenie czy gra już wystartowała
@@ -687,34 +643,8 @@ function pageLobbyTick(params) {
     return { action: 'game_already_started', isSeatedInLobby: true };
   }
 
-  // KROK 6 (KLUCZ DO MONET!): Gdy wszystkie 3 okna siedzą przy stole (3/3),
-  // Host przełącza pokój z "Private room" na PUBLICZNY ("Make public") i od razu klika "Start Game"!
+  // KROK 6: Kliknięcie "Start Game" (gdy wszystkie 3 okna siedzą przy stole)
   if (isHost && startGameBtn && allJoined) {
-    // 6A. Jeśli otwarte jest okienko potwierdzenia "Make public", kliknij "Make public"
-    const makePublicBtn = findClickable(/^make public$/i);
-    if (makePublicBtn) {
-      smartClick(makePublicBtn);
-      window.__rbMadePublic = true;
-      return { action: 'made_room_public', isSeatedInLobby: true };
-    }
-
-    // 6B. Jeśli pokój nadal jest prywatny, kliknij przełącznik obok "Private room"
-    if (!window.__rbMadePublic) {
-      const allDivs = Array.from(document.querySelectorAll('div, span, label'));
-      const privLabel = allDivs.find((el) => (el.textContent || '').trim().startsWith('Private room'));
-      if (privLabel && privLabel.parentElement) {
-        const settingRow = privLabel.parentElement.parentElement || privLabel.parentElement;
-        const switchEl = settingRow.querySelector('input[type="checkbox"], button, [role="switch"]');
-        if (switchEl && !switchEl.disabled) {
-          smartClick(switchEl);
-          window.__rbMadePublic = true;
-          return { action: 'toggled_private_room', isSeatedInLobby: true };
-        }
-      }
-      window.__rbMadePublic = true;
-    }
-
-    // 6C. Klikamy "Start Game"!
     smartClick(startGameBtn);
     return { action: 'start_clicked', isSeatedInLobby: true };
   }
@@ -730,7 +660,7 @@ function pageLobbyTick(params) {
  * Główny krok rozgrywki wykonywany w każdym z 3 okien podczas trwania meczu
  */
 function pageGameplayTick(params) {
-  const { shouldSurrender, allowGameOverCheck, canBuyMoreProperties, maxPropertyPrice } = params;
+  const { shouldSurrender, allowGameOverCheck } = params;
 
   const isVisible = (el) => {
     if (!el) return false;
@@ -775,7 +705,7 @@ function pageGameplayTick(params) {
       return regex.test(txt);
     });
 
-  // 0. Sprawdzenie czy gra się zakończyła (ekran końcowy / wygrana)
+  // 0. Sprawdzenie czy gra oficjalnie zakończyła się ekranem "Game over!" / "Another game"
   if (allowGameOverCheck) {
     const playAgainBtn = findBtn(/^(play again|another game|zagraj ponownie|kolejna gra)$/i);
     if (playAgainBtn) {
@@ -783,13 +713,7 @@ function pageGameplayTick(params) {
     }
   }
 
-  // 1. Gdyby okno wciąż miało niezamknięty "Make public" lub "Start Game", kliknij go
-  const makePublicBtn = findBtn(/^make public$/i);
-  if (makePublicBtn) {
-    smartClick(makePublicBtn);
-    return { event: 'clicked_make_public' };
-  }
-
+  // 1. Gdyby okno wciąż miało niezamknięty "Start Game", kliknij go
   const startGameBtn = findBtn(/^start game$/i);
   if (startGameBtn) {
     smartClick(startGameBtn);
@@ -810,46 +734,44 @@ function pageGameplayTick(params) {
     return { event: 'passed_auction' };
   }
 
-  // 4. Obsługa poddania się (Bankrupt) dla BOT 1 (>= 35 rund) oraz BOT 2 (>= 45 rund)
-  const bankruptBtns = buttons.filter((b) => {
-    const txt = (b.innerText || b.textContent || '').replace(/\s+/g, ' ').trim();
-    return /^(confirm|yes|bankrupt|declare bankruptcy|surrender|potwierdź|tak|zbankrutuj|poddaj się)$/i.test(txt);
-  });
-
+  // 4. NAPRAWIONE PODDAWANIE SIĘ (Bankrupt) dla BOT 1 (>= 100 rund) oraz BOT 2 (>= 120 rund):
+  // W kodzie Richup.io okienko potwierdzenia ("File your bankruptcy" -> "Are you sure you want to bankrupt?")
+  // renderuje przycisk potwierdzający "Bankrupt" bezpośrednio obok przycisku "Cancel" (jako pierwszy w DOM!).
   if (shouldSurrender) {
-    if (bankruptBtns.length > 0) {
-      const target = bankruptBtns[bankruptBtns.length - 1];
-      smartClick(target);
-      return {
-        event: 'surrender_clicked',
-        label: (target.innerText || '').trim(),
-        bankruptButtonsCount: bankruptBtns.length,
-      };
-    } else {
-      return { event: 'already_bankrupt' };
+    // 4A. Najpierw sprawdzamy, czy na ekranie jest otwarte okienko potwierdzenia z przyciskiem "Cancel"
+    const cancelBtn = findBtn(/^cancel$/i);
+    if (cancelBtn && cancelBtn.parentElement) {
+      const modalBankruptBtn = Array.from(cancelBtn.parentElement.querySelectorAll('button')).find((b) =>
+        /^bankrupt|yes|confirm$/i.test((b.innerText || b.textContent || '').trim())
+      );
+      if (modalBankruptBtn && !modalBankruptBtn.disabled) {
+        smartClick(modalBankruptBtn);
+        return { event: 'surrender_confirmed_in_modal', label: 'Bankrupt (Modal)' };
+      }
     }
+
+    // 4B. Jeśli okienko potwierdzenia nie jest jeszcze otwarte, klikamy główny przycisk "Bankrupt" w panelu gracza
+    const mainBankruptBtn = buttons.find((b) => /^bankrupt$/i.test((b.innerText || b.textContent || '').trim()));
+    if (mainBankruptBtn) {
+      mainBankruptBtn.scrollIntoView({ block: 'center' });
+      smartClick(mainBankruptBtn);
+      return { event: 'surrender_opened_modal', label: 'Bankrupt (Panel)' };
+    }
+
+    // 4C. Gdy przycisk "Bankrupt" stał się disabled (r = e.bankruptedAt !== null), gracz jest już oficjalnie bankrutem!
+    return { event: 'already_bankrupt' };
   }
 
-  // 5. Inteligentne kupowanie nieruchomości (BEZ ulepszania domkami i z zachowaniem bufora gotówki!)
-  if (canBuyMoreProperties) {
-    const buyBtn = buttons.find((b) => {
-      const txt = (b.innerText || b.textContent || '').replace(/\s+/g, ' ').trim();
-      if (/house|hotel|upgrade|build|dom|ulepsz|buduj/i.test(txt)) return false;
-      if (b.querySelector('[data-icon="arrow-up-from-line"]')) return false;
-      if (!/^(buy for \$|buy\b|kup za|kup\b)/i.test(txt)) return false;
-
-      const priceMatch = txt.match(/\$(\d+)/);
-      if (priceMatch) {
-        const price = parseInt(priceMatch[1], 10);
-        if (price > maxPropertyPrice) return false;
-      }
-      return true;
-    });
-
-    if (buyBtn) {
-      smartClick(buyBtn);
-      return { event: 'bought_property', label: (buyBtn.innerText || '').trim() };
-    }
+  // 5. Kupowanie wszystkich nieruchomości, na których stanie bot (BEZ ulepszania domkami!)
+  const buyBtn = buttons.find((b) => {
+    const txt = (b.innerText || b.textContent || '').replace(/\s+/g, ' ').trim();
+    if (/house|hotel|upgrade|build|dom|ulepsz|buduj/i.test(txt)) return false;
+    if (b.querySelector('[data-icon="arrow-up-from-line"]')) return false;
+    return /^(buy for \$|buy\b|kup za|kup\b)/i.test(txt);
+  });
+  if (buyBtn) {
+    smartClick(buyBtn);
+    return { event: 'bought_property', label: (buyBtn.innerText || '').trim() };
   }
 
   // 6. Rzut kostką: rozróżniamy pierwszy rzut w rundzie ("Roll the dice") od dubletu ("Roll again")
@@ -907,11 +829,11 @@ class RichupOrchestrator {
 
   async start() {
     console.log('==============================================================');
-    console.log('  RICHUP.IO BOT NOCNY - MAX COIN PROFIT EDITION v2');
-    console.log('  - Pokój 3/3 automatycznie przełączany na PUBLICZNY przed startem');
-    console.log('  - Automatyczny wybór wolnego koloru pionka (aria-label)');
-    console.log('  - Automatyczne zamykanie zgód RODO (Consent)');
-    console.log('  - Bot 1 poddaje się po 35 rundach | Bot 2 po 45 rundach');
+    console.log('  RICHUP.IO BOT NOCNY (SPRAWDZONA KONFIGURACJA 100 / 120 RUND)');
+    console.log('  - Prywatny pokój z kasą startową $3000');
+    console.log('  - Wszystkie boty kupują pola (bez budowania domków)');
+    console.log('  - Bot 1 poddaje się po 100 rundach | Bot 2 po 120 rundach');
+    console.log('  - Naprawione potwierdzanie bankructwa w okienku modalnym');
     console.log('==============================================================\n');
 
     for (const client of this.clients) {
@@ -945,8 +867,6 @@ class RichupOrchestrator {
           coinsEarned: this.coinsEarned,
           gameNumber: this.gameNumber,
           rounds: c.rounds,
-          propertiesBought: c.propertiesBought,
-          maxProperties: CONFIG.maxPropertiesPerBot,
           surrenderAtRound: c.cfg.surrenderAtRound === Infinity ? 999999 : c.cfg.surrenderAtRound,
           bot1Rounds: this.bot1.rounds,
           bot1Limit: CONFIG.bot1SurrenderRound,
@@ -990,7 +910,7 @@ class RichupOrchestrator {
       return;
     }
     if (this.state === 'PLAYING' && Date.now() - this.gameStartTime > CONFIG.maxGameDurationMs) {
-      console.log('[WATCHDOG] Gra przekroczyła 22 minuty. Zakładam nowy pokój...');
+      console.log('[WATCHDOG] Gra przekroczyła 40 minut. Zakładam nowy pokój...');
       this.setState('CREATE_ROOM');
       return;
     }
@@ -1012,9 +932,6 @@ class RichupOrchestrator {
   async handleCreateRoom() {
     for (const c of this.clients) c.resetForNewGame();
     this.roomUrl = null;
-
-    await this.bot1.resetGuestIdentity();
-    await this.bot2.resetGuestIdentity();
 
     const hostUrl = await this.host.eval('location.href');
     if (hostUrl.includes('/room/')) {
@@ -1040,7 +957,7 @@ class RichupOrchestrator {
       console.log(`[HOST] Wygenerowano link pokoju: ${this.roomUrl}`);
       console.log(`[HOST] Czekam aż HOST wejdzie do środka jako pierwszy (żeby miał 👑 Hosta)...`);
 
-      await this.host.eval('window.__rbColorTry = 0; window.__rbMadePublic = false;');
+      await this.host.eval('window.__rbColorTry = 0; window.__rbLobbyConfigured = false;');
 
       this.setState('WAIT_HOST_SEATED');
     }
@@ -1123,12 +1040,9 @@ class RichupOrchestrator {
       } else if (res?.action === 'join_clicked') {
         c.lastAction = `Kliknięto "${res.label}"...`;
         console.log(`[${c.cfg.name}] Kliknięto dołączenie: "${res.label}"`);
-      } else if (res?.action === 'max_players_set_3') {
-        c.lastAction = 'Ustawiono Maximum players = 3!';
-        console.log('[HOST] ⚙️ Ustawiono Maximum players = 3 (pokój 3-osobowy)');
-      } else if (res?.action === 'toggled_private_room' || res?.action === 'made_room_public') {
-        c.lastAction = 'Przełączono pokój 3/3 na PUBLICZNY (pod monety)!';
-        console.log('[HOST] 🌐 Przełączono pełny pokój 3/3 na PUBLICZNY (isPrivate = false)!');
+      } else if (res?.action === 'starting_cash_set_3000') {
+        c.lastAction = 'Ustawiono Starting cash = $3000!';
+        console.log('[HOST] 💰 Ustawiono Starting cash = $3000!');
       } else if (res?.action === 'start_clicked') {
         c.lastAction = 'Rozpoczynam grę (Start Game)!';
         console.log(`[${c.cfg.name}] 🚀 Wszyscy 3 gracze przy stole! Kliknięto Start Game!`);
@@ -1144,7 +1058,7 @@ class RichupOrchestrator {
       } else if (!c.joinedLobby) {
         c.lastAction = 'Wchodzę do gry (Enter / Join)...';
       } else {
-        c.lastAction = allJoined ? 'Upubliczniam pokój 3/3 i klikam Start...' : 'Czekam na pozostałe boty...';
+        c.lastAction = allJoined ? 'Klikam Start Game...' : 'Czekam na pozostałe boty...';
       }
     }
   }
@@ -1155,13 +1069,10 @@ class RichupOrchestrator {
 
     for (const c of this.clients) {
       const shouldSurrender = c.cfg.id !== 'host' && c.rounds >= c.cfg.surrenderAtRound;
-      const canBuyMoreProperties = c.propertiesBought < CONFIG.maxPropertiesPerBot;
 
       const res = await c.eval(pageGameplayTick, {
         shouldSurrender,
         allowGameOverCheck,
-        canBuyMoreProperties,
-        maxPropertyPrice: CONFIG.maxPropertyPrice,
       });
 
       if (!res) continue;
@@ -1183,52 +1094,37 @@ class RichupOrchestrator {
         case 'rolled_again':
           c.lastAction = `Dublet - rzucam ponownie (Runda ${c.rounds})`;
           break;
-        case 'bought_property': {
-          const now = Date.now();
-          if (now - c.lastBuyTimestamp > 1200) {
-            c.propertiesBought++;
-            c.lastBuyTimestamp = now;
-          }
-          c.lastAction = `Kupiono pole ${c.propertiesBought}/${CONFIG.maxPropertiesPerBot} (${res.label})`;
+        case 'bought_property':
+          c.lastAction = `Kupiono pole (${res.label})`;
           break;
-        }
         case 'ended_turn':
           c.lastAction = `Zakończono turę (Runda ${c.rounds})`;
           break;
-        case 'surrender_clicked':
-          c.surrenderClicks++;
-          c.lastAction = `🏳️ Poddaję grę (${res.label})...`;
-          if (c.surrenderClicks >= 2 && !c.surrendered) {
-            console.log(`[${c.cfg.name}] 🏳️ Kliknięto potwierdzenie poddania po ${c.rounds} rundach!`);
-          }
+        case 'surrender_opened_modal':
+          c.lastAction = `🏳️ Otwieram okienko Bankrupt (Runda ${c.rounds})...`;
+          console.log(`[${c.cfg.name}] 🏳️ Kliknięto przycisk Bankrupt w panelu (otwieranie modala)...`);
+          break;
+        case 'surrender_confirmed_in_modal':
+          c.lastAction = `🏳️ Potwierdzono Bankrupt w modalu!`;
+          console.log(`[${c.cfg.name}] 🏳️ Potwierdzono bankructwo w okienku modalnym po ${c.rounds} rundach!`);
           break;
         case 'already_bankrupt':
-          if (c.surrenderClicks >= 1 && !c.surrendered) {
+          if (!c.surrendered) {
             c.surrendered = true;
-            c.lastAction = `🏳️ Poddano grę (Wyeliminowany)`;
-            console.log(`[${c.cfg.name}] 🏳️ Bot oficjalnie wyeliminowany po ${c.rounds} rundach!`);
+            c.lastAction = `🏳️ Wyeliminowany (Bankrut)`;
+            console.log(`[${c.cfg.name}] ✅ Bot jest już oficjalnie wyeliminowany z gry!`);
           }
           break;
         case 'game_over':
-          console.log(`[${c.cfg.name}] 🏆 Wykryto koniec gry! Twoje główne konto wygrywa!`);
+          console.log(`[${c.cfg.name}] 🏆 Ekran "Game over!" widoczny! Czekam 6 sekund na zapis wygranej i monety w profilu...`);
+          this.host.lastAction = '🏆 WYGRANA (Game over)! Zapisywanie w profilu...';
           this.gamesWon++;
-          await sleep(5000);
+          await sleep(6000);
           this.setState('NEXT_GAME');
           return;
         default:
-          if (shouldSurrender && !c.surrendered) {
-            c.lastAction = `Szukam przycisku Bankrupt (${c.rounds} rund)...`;
-          }
           break;
       }
-    }
-
-    if (this.bot1.surrendered && this.bot2.surrendered) {
-      console.log('[INFO] Oba boty-goście się poddały! Czekam 6 sekund na zapisanie monet na koncie Hosta...');
-      this.host.lastAction = '🏆 WYGRANA! Zapisywanie monet...';
-      await sleep(6000);
-      this.gamesWon++;
-      this.setState('NEXT_GAME');
     }
   }
 
