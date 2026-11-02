@@ -1,17 +1,17 @@
 /**
- * Richup.io Overnight Coin Farming Bot (Szybka & Pewna Konfiguracja)
+ * Richup.io Overnight Coin Farming Bot (Pewna Konfiguracja 100 / 120 rund)
  * Architektura:
  *  - Okno 1 (HOST): Twoje główne konto (zapisana sesja w profiles/host) - ZAWSZE WYGRYWA
- *  - Okno 2 (BOT 1): Konto gościa (profiles/bot1) - poddaje się po 80 rundach
- *  - Okno 3 (BOT 2): Konto gościa (profiles/bot2) - poddaje się po 100 rundach
+ *  - Okno 2 (BOT 1): Konto gościa (profiles/bot1) - poddaje się po 100 rundach
+ *  - Okno 3 (BOT 2): Konto gościa (profiles/bot2) - poddaje się po 120 rundach
  *
- * Zasady maksymalizujące szybkość zdobywania monet i statystyk profilu:
- *  1. Host tworzy prywatny pokój, ustawia "Maximum players = 3", "Starting cash = $3000" oraz wyłącza boty AI.
+ * Zasady maksymalizujące zdobywanie monet i statystyk profilu:
+ *  1. Host tworzy prywatny pokój, ustawia "Starting cash = $3000", "Maximum players = 3" oraz wyłącza boty AI.
  *  2. Gdy wszystkie 3 okna (Host + Bot 1 + Bot 2) zajmą miejsca przy stole (3/3), Host przełącza pokój na
  *     PUBLICZNY ("Private room" -> OFF -> "Make public") i od razu klika "Start Game".
  *     Dzięki temu nikt obcy nie wejdzie (3/3 zajęte), a gra liczy się zarówno do monet, jak i statystyk profilu!
  *  3. Żaden gracz nie buduje domków ani hoteli (kupowane są wyłącznie czyste pola miast/lotnisk/elektrowni).
- *  4. Przyspieszony cykl akcji (350ms) oraz limit rund do poddania: 80 i 100 rund.
+ *  4. Przyspieszony cykl akcji (350ms) oraz limit rund do poddania: 100 i 120 rund.
  */
 
 const { spawn } = require('child_process');
@@ -35,10 +35,10 @@ try {
 
 // ==================== KONFIGURACJA ====================
 const CONFIG = {
-  bot1SurrenderRound: 80,  // Bot 1 poddaje się po 80 swoich rundach
-  bot2SurrenderRound: 100, // Bot 2 poddaje się po 100 swoich rundach
+  bot1SurrenderRound: 100, // Bot 1 poddaje się po 100 swoich rundach
+  bot2SurrenderRound: 120, // Bot 2 poddaje się po 120 swoich rundach
   tickIntervalMs: 350,     // Przyspieszona pętla sprawdzania stanu gry (350ms)
-  maxGameDurationMs: 35 * 60 * 1000, // Watchdog: max 35 minut na jedną grę
+  maxGameDurationMs: 45 * 60 * 1000, // Watchdog: max 45 minut na jedną grę
   chromePath: findChromePath(),
   instances: [
     {
@@ -53,22 +53,22 @@ const CONFIG = {
     },
     {
       id: 'bot1',
-      name: 'BOT 1 (Gość - 80 rund)',
+      name: 'BOT 1 (Gość - 100 rund)',
       port: 9223,
       profileDir: path.join(__dirname, 'profiles', 'bot1'),
       windowPos: '640,0',
       windowSize: '640,900',
-      surrenderAtRound: 80,
+      surrenderAtRound: 100,
       preferredColorIndex: 3,
     },
     {
       id: 'bot2',
-      name: 'BOT 2 (Gość - 100 rund)',
+      name: 'BOT 2 (Gość - 120 rund)',
       port: 9224,
       profileDir: path.join(__dirname, 'profiles', 'bot2'),
       windowPos: '1280,0',
       windowSize: '640,900',
-      surrenderAtRound: 100,
+      surrenderAtRound: 120,
       preferredColorIndex: 7,
     },
   ],
@@ -969,10 +969,10 @@ class RichupOrchestrator {
 
   async start() {
     console.log('==============================================================');
-    console.log('  RICHUP.IO BOT NOCNY (80 / 100 RUND + STATYSTYKI PROFILU)');
+    console.log('  RICHUP.IO BOT NOCNY (100 / 120 RUND + STATYSTYKI PROFILU)');
     console.log('  - Pokój 3/3 zamieniany na PUBLICZNY przed startem ($3000 na start)');
     console.log('  - Kupowanie czystych pól (BEZ budowania domków/hoteli)');
-    console.log('  - Bot 1 poddaje się po 80 rundach | Bot 2 po 100 rundach');
+    console.log('  - Bot 1 poddaje się po 100 rundach | Bot 2 po 120 rundach');
     console.log('  - Szybki cykl akcji (350ms)');
     console.log('==============================================================\n');
 
