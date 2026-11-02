@@ -679,7 +679,7 @@ function pageLobbyTick(params) {
     return { action: 'game_already_started', isSeatedInLobby: true };
   }
 
-  // KROK 5 (HOST): Konfiguracja ustawień pokoju (z limitem prób, aby nigdy nie zablokować Start Game)
+  // KROK 5 (HOST): Konfiguracja ustawień pokoju (czekając aż zniknie e.isLoading / "Updating settings...")
   if (isHost && isSeatedInLobby) {
     // 5A. Jeśli otwarte jest okienko potwierdzenia "Make public", kliknij je od razu!
     const makePublicModalBtn = findClickable(/^make public$/i);
@@ -688,22 +688,30 @@ function pageLobbyTick(params) {
       return { action: 'make_public_confirmed', isSeatedInLobby: true };
     }
 
-    const selects = Array.from(document.querySelectorAll('select')).filter((s) => !s.disabled);
-
-    // 5B. Ustaw "Maximum players" = 3 (maksymalnie 2 próby na pokój)
-    if ((window.__rbTriesMaxPlayers || 0) < 2) {
-      for (const sel of selects) {
-        const optValues = Array.from(sel.options).map((o) => o.value);
-        if (optValues.includes('2') && optValues.includes('3') && optValues.includes('4') && sel.value !== '3') {
-          window.__rbTriesMaxPlayers = (window.__rbTriesMaxPlayers || 0) + 1;
-          setReactSelectValue(sel, '3');
-          return { action: 'max_players_set_3', isSeatedInLobby: true };
+    // Sprawdź bezpośrednio w React Fiber (.xZ3-HzVs -> yg.props.isLoading), czy trwa zapisywanie poprzedniego ustawienia
+    let isUpdatingSettings = /updating settings/i.test(bodyText);
+    const settingsCont = document.querySelector('.xZ3-HzVs');
+    if (settingsCont) {
+      const fk = Object.keys(settingsCont).find((k) => k.startsWith('__reactFiber$'));
+      let fib = fk ? settingsCont[fk] : null;
+      for (let i = 0; i < 6 && fib; i++, fib = fib.return) {
+        if (typeof fib.memoizedProps?.isLoading === 'boolean') {
+          if (fib.memoizedProps.isLoading) isUpdatingSettings = true;
+          break;
         }
       }
     }
 
-    // 5C. Ustaw "Starting cash" = $3000 (maksymalnie 2 próby na pokój)
-    if ((window.__rbTriesCash || 0) < 2) {
+    if (isUpdatingSettings && (window.__rbLoadingWaitTicks || 0) < 25) {
+      window.__rbLoadingWaitTicks = (window.__rbLoadingWaitTicks || 0) + 1;
+      return { action: 'updating_settings', isSeatedInLobby: true };
+    }
+    window.__rbLoadingWaitTicks = 0;
+
+    const selects = Array.from(document.querySelectorAll('select')).filter((s) => !s.disabled);
+
+    // 5B. PRIORYTET #1: Ustaw "Starting cash" = $3000
+    if ((window.__rbTriesCash || 0) < 4) {
       for (const sel of selects) {
         const optValues = Array.from(sel.options).map((o) => o.value);
         if (optValues.includes('1500') && optValues.includes('3000') && sel.value !== '3000') {
@@ -714,8 +722,20 @@ function pageLobbyTick(params) {
       }
     }
 
+    // 5C. PRIORYTET #2: Ustaw "Maximum players" = 3
+    if ((window.__rbTriesMaxPlayers || 0) < 4) {
+      for (const sel of selects) {
+        const optValues = Array.from(sel.options).map((o) => o.value);
+        if (optValues.includes('2') && optValues.includes('3') && optValues.includes('4') && sel.value !== '3') {
+          window.__rbTriesMaxPlayers = (window.__rbTriesMaxPlayers || 0) + 1;
+          setReactSelectValue(sel, '3');
+          return { action: 'max_players_set_3', isSeatedInLobby: true };
+        }
+      }
+    }
+
     // 5D. Upewnij się, że "Allow bots to join" jest wyłączone (OFF)
-    if ((window.__rbTriesBots || 0) < 2) {
+    if ((window.__rbTriesBots || 0) < 3) {
       const botsToggleBtn = document.querySelector('button[aria-label="Allow bots to join"]');
       const botsProps = getToggleFiberProps(botsToggleBtn);
       if (botsToggleBtn && !botsToggleBtn.disabled && botsProps?.isOn === true) {
@@ -727,7 +747,7 @@ function pageLobbyTick(params) {
 
     // 5E. Gdy wszystkie 3 okna siedzą przy stole (3/3), przełącz "Private room" -> OFF ("Make public") i kliknij "Start Game"
     if (allJoined) {
-      if ((window.__rbMakePublicTries || 0) < 2) {
+      if ((window.__rbMakePublicTries || 0) < 3) {
         let privateToggleBtn = null;
         for (const btn of Array.from(document.querySelectorAll('button'))) {
           if (!getToggleFiberProps(btn)) continue;
@@ -1078,7 +1098,7 @@ class RichupOrchestrator {
       console.log(`[HOST] Czekam aż HOST wejdzie do środka jako pierwszy (żeby miał 👑 Hosta)...`);
 
       await this.host.eval(
-        'window.__rbColorTry = 0; window.__rbTriesMaxPlayers = 0; window.__rbTriesCash = 0; window.__rbTriesBots = 0; window.__rbMakePublicTries = 0;'
+        'window.__rbColorTry = 0; window.__rbLoadingWaitTicks = 0; window.__rbTriesMaxPlayers = 0; window.__rbTriesCash = 0; window.__rbTriesBots = 0; window.__rbMakePublicTries = 0;'
       );
 
       this.setState('WAIT_HOST_SEATED');
