@@ -912,6 +912,32 @@ function pageGameplayTick(params) {
     return { event: 'bought_property', label: (buyBtn.innerText || '').trim() };
   }
 
+  // 5B. OCHRONA PRZED TIMEOUTEM NA DROGIM POLU:
+  //     Jeśli gracz stanął na niekupionym polu, na które go NIE stać (przycisk "Buy for $..." jest disabled),
+  //     Richup ukrywa przycisk "End turn" i wyświetla w jego miejscu wyłącznie przycisk "Auction"!
+  //     Bez kliknięcia "Auction" zegar tury (60s) wygasa i wyrzuca gracza z gry!
+  const startAuctionBtn = findBtn(/^(auction|aukcja)$/i);
+  if (startAuctionBtn) {
+    smartClick(startAuctionBtn);
+    return { event: 'started_auction_when_cant_afford' };
+  }
+
+  // 5C. OCHRONA HOSTA PRZED UJEMNĄ GOTÓWKĄ (selfMoney < 0 blokuje "End turn"):
+  //     Jeśli Host ma ujemne konto (np. przez podatek lub czynsz), zastaw (Mortgage) dowolną posiadaną nieruchomość
+  if (isHost && selfMoney !== null && !Number.isNaN(selfMoney) && selfMoney < 0) {
+    const mortgageBtn = document.querySelector('button.cQDJVuoQ:not(:disabled)');
+    if (mortgageBtn && isVisible(mortgageBtn)) {
+      smartClick(mortgageBtn);
+      return { event: 'mortgaged_for_debt' };
+    }
+    const propEls = Array.from(document.querySelectorAll('.YTmH8X8Z'));
+    if (propEls.length > 0) {
+      const idx = (window.__rbDebtPropIdx = ((window.__rbDebtPropIdx || 0) + 1) % propEls.length);
+      smartClick(propEls[idx]);
+      return { event: 'opened_prop_for_debt' };
+    }
+  }
+
   // 6. Rzut kostką: rozróżniamy pierwszy rzut w rundzie ("Roll the dice") od dubletu ("Roll again")
   const rollInitialBtn = findBtn(/roll the dice|roll dice|rzuć kostką|rzuć kośćmi/i);
   if (rollInitialBtn) {
