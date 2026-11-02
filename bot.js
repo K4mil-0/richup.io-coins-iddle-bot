@@ -533,8 +533,21 @@ function pageLobbyTick(params) {
   const isVisible = (el) => {
     if (!el) return false;
     const rect = el.getBoundingClientRect();
-    const style = getComputedStyle(el);
-    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none' && style.opacity !== '0';
+    if (rect.width <= 0 || rect.height <= 0) return false;
+    let cur = el;
+    while (cur && cur !== document.body) {
+      const style = getComputedStyle(cur);
+      if (
+        style.display === 'none' ||
+        style.visibility === 'hidden' ||
+        parseFloat(style.opacity) === 0 ||
+        style.pointerEvents === 'none'
+      ) {
+        return false;
+      }
+      cur = cur.parentElement;
+    }
+    return true;
   };
 
   const smartClick = (el) => {
@@ -612,50 +625,54 @@ function pageLobbyTick(params) {
       return regex.test(txt);
     });
 
+  // Sprawdzenie czy gracz już siedzi przy stole (ma swój wiersz [data-is-me="true"] na liście graczy)
+  const isAlreadyInPlayerList = !!document.querySelector('[data-is-me="true"]');
+  const changeAppearanceBtn = findClickable(/change appearance|zmień wygląd/i);
+  const startGameBtn = findClickable(/start game|rozpocznij grę/i);
+  const isSeatedInLobby = isAlreadyInPlayerList || !!changeAppearanceBtn || !!startGameBtn;
+
   const bodyText = document.body ? document.body.innerText : '';
-  if (/loading game/i.test(bodyText) && !findClickable(/enter game|join game|start game|change appearance/i)) {
+  if (!isSeatedInLobby && /loading game/i.test(bodyText) && !findClickable(/enter game|join game/i)) {
     return { action: 'loading_game', isSeatedInLobby: false };
   }
 
-  // KROK 1: Ekran powitalny ("Your nickname..." + przycisk ">> Enter Game")
-  const enterGameBtn = findClickable(/enter game|wejdź do gry/i);
-  if (enterGameBtn) {
-    smartClick(enterGameBtn);
-    return { action: 'enter_game_clicked', label: (enterGameBtn.innerText || '').trim(), isSeatedInLobby: false };
-  }
-
-  // KROK 2: Ekran wyboru wyglądu pionka ("Select your player appearance:" + kółka button[aria-label^="Select appearance"])
-  const appearanceBtns = Array.from(document.querySelectorAll('button[aria-label^="Select appearance"]')).filter(
-    (b) => isVisible(b) && !b.disabled
-  );
-  const anyJoinBtn = getClickableElements(true).find((el) =>
-    /^(join game|dołącz do gry)$/i.test((el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim())
-  );
-
-  if (appearanceBtns.length > 0 || anyJoinBtn) {
-    const enabledJoinBtn = findClickable(/^(join game|dołącz do gry)$/i);
-    if (!enabledJoinBtn && appearanceBtns.length > 0) {
-      window.__rbColorTry = (window.__rbColorTry || 0) + 1;
-      const idx = ((preferredColorIndex || 0) + window.__rbColorTry) % appearanceBtns.length;
-      const chosenCircle = appearanceBtns[idx];
-      smartClick(chosenCircle);
-      return {
-        action: 'appearance_selected',
-        label: chosenCircle.getAttribute('aria-label') || 'kolor',
-        isSeatedInLobby: false,
-      };
+  // KROK 1 i KROK 2 wykonujemy TYLKO wtedy, gdy gracz NIE siedzi jeszcze przy stole!
+  if (!isSeatedInLobby) {
+    // KROK 1: Ekran powitalny ("Your nickname..." + przycisk ">> Enter Game")
+    const enterGameBtn = findClickable(/enter game|wejdź do gry/i);
+    if (enterGameBtn) {
+      smartClick(enterGameBtn);
+      return { action: 'enter_game_clicked', label: (enterGameBtn.innerText || '').trim(), isSeatedInLobby: false };
     }
 
-    if (enabledJoinBtn) {
-      smartClick(enabledJoinBtn);
-      return { action: 'join_clicked', label: (enabledJoinBtn.innerText || '').trim(), isSeatedInLobby: false };
+    // KROK 2: Ekran wyboru wyglądu pionka ("Select your player appearance:" + kółka button[aria-label^="Select appearance"])
+    const appearanceBtns = Array.from(document.querySelectorAll('button[aria-label^="Select appearance"]')).filter(
+      (b) => isVisible(b) && !b.disabled
+    );
+    const anyJoinBtn = getClickableElements(true).find((el) =>
+      /^(join game|dołącz do gry)$/i.test((el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim())
+    );
+
+    if (appearanceBtns.length > 0 || anyJoinBtn) {
+      const enabledJoinBtn = findClickable(/^(join game|dołącz do gry)$/i);
+      if (!enabledJoinBtn && appearanceBtns.length > 0) {
+        window.__rbColorTry = (window.__rbColorTry || 0) + 1;
+        const idx = ((preferredColorIndex || 0) + window.__rbColorTry) % appearanceBtns.length;
+        const chosenCircle = appearanceBtns[idx];
+        smartClick(chosenCircle);
+        return {
+          action: 'appearance_selected',
+          label: chosenCircle.getAttribute('aria-label') || 'kolor',
+          isSeatedInLobby: false,
+        };
+      }
+
+      if (enabledJoinBtn) {
+        smartClick(enabledJoinBtn);
+        return { action: 'join_clicked', label: (enabledJoinBtn.innerText || '').trim(), isSeatedInLobby: false };
+      }
     }
   }
-
-  // KROK 3: Sprawdzenie czy gracz faktycznie siedzi już przy stole w pokoju
-  const changeAppearanceBtn = findClickable(/change appearance|zmień wygląd/i);
-  const startGameBtn = findClickable(/start game|rozpocznij grę/i);
-  const isSeatedInLobby = !!changeAppearanceBtn || !!startGameBtn;
 
   // KROK 4: Sprawdzenie czy gra już wystartowała
   const inGameIndicator = findClickable(/^(roll the dice|roll again|end turn|rzuć kostką|zakończ turę)$/i);
@@ -706,22 +723,28 @@ function pageLobbyTick(params) {
 
     // 5E. Gdy wszystkie 3 okna siedzą przy stole (3/3), przełącz "Private room" -> OFF ("Make public") i kliknij "Start Game"
     if (allJoined) {
-      // Znajdź przełącznik w wierszu "Private room"
       let privateToggleBtn = null;
-      const allDivs = Array.from(document.querySelectorAll('div'));
-      for (const d of allDivs) {
-        if ((d.innerText || '').trim() === 'Private room' && d.parentElement && d.parentElement.parentElement) {
-          const row = d.parentElement.parentElement;
-          const btn = row.querySelector('button');
-          if (btn) {
+      for (const btn of Array.from(document.querySelectorAll('button'))) {
+        if (getToggleState(btn) === null) continue;
+        let cur = btn.parentElement;
+        for (let i = 0; i < 5 && cur; i++, cur = cur.parentElement) {
+          const txt = (cur.innerText || '').trim();
+          if (/^Private room\b/i.test(txt)) {
             privateToggleBtn = btn;
             break;
           }
         }
+        if (privateToggleBtn) break;
       }
 
       const isPrivateOn = getToggleState(privateToggleBtn);
-      if (privateToggleBtn && !privateToggleBtn.disabled && isPrivateOn === true) {
+      if (
+        privateToggleBtn &&
+        !privateToggleBtn.disabled &&
+        isPrivateOn === true &&
+        (window.__rbMakePublicTries || 0) < 3
+      ) {
+        window.__rbMakePublicTries = (window.__rbMakePublicTries || 0) + 1;
         smartClick(privateToggleBtn);
         return { action: 'toggled_private_off', isSeatedInLobby: true };
       }
@@ -749,8 +772,21 @@ function pageGameplayTick(params) {
   const isVisible = (el) => {
     if (!el) return false;
     const rect = el.getBoundingClientRect();
-    const style = getComputedStyle(el);
-    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none' && style.opacity !== '0';
+    if (rect.width <= 0 || rect.height <= 0) return false;
+    let cur = el;
+    while (cur && cur !== document.body) {
+      const style = getComputedStyle(cur);
+      if (
+        style.display === 'none' ||
+        style.visibility === 'hidden' ||
+        parseFloat(style.opacity) === 0 ||
+        style.pointerEvents === 'none'
+      ) {
+        return false;
+      }
+      cur = cur.parentElement;
+    }
+    return true;
   };
 
   const smartClick = (el) => {
@@ -1125,7 +1161,7 @@ class RichupOrchestrator {
       console.log(`[HOST] Wygenerowano link pokoju: ${this.roomUrl}`);
       console.log(`[HOST] Czekam aż HOST wejdzie do środka jako pierwszy (żeby miał 👑 Hosta)...`);
 
-      await this.host.eval('window.__rbColorTry = 0;');
+      await this.host.eval('window.__rbColorTry = 0; window.__rbMakePublicTries = 0;');
 
       this.setState('WAIT_HOST_SEATED');
     }
