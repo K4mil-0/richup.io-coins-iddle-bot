@@ -2,17 +2,16 @@
  * Richup.io Overnight Coin Farming Bot (Szybka & Pewna Konfiguracja)
  * Architektura:
  *  - Okno 1 (HOST): Twoje główne konto (zapisana sesja w profiles/host) - ZAWSZE WYGRYWA
- *  - Okno 2 (BOT 1): Konto gościa (profiles/bot1) - poddaje się po 50 rundach (lub wcześniej przy długu < $0)
- *  - Okno 3 (BOT 2): Konto gościa (profiles/bot2) - poddaje się po 60 rundach (lub wcześniej przy długu < $0)
+ *  - Okno 2 (BOT 1): Konto gościa (profiles/bot1) - poddaje się po 80 rundach
+ *  - Okno 3 (BOT 2): Konto gościa (profiles/bot2) - poddaje się po 100 rundach
  *
  * Zasady maksymalizujące szybkość zdobywania monet i statystyk profilu:
  *  1. Host tworzy prywatny pokój, ustawia "Maximum players = 3", "Starting cash = $3000" oraz wyłącza boty AI.
  *  2. Gdy wszystkie 3 okna (Host + Bot 1 + Bot 2) zajmą miejsca przy stole (3/3), Host przełącza pokój na
  *     PUBLICZNY ("Private room" -> OFF -> "Make public") i od razu klika "Start Game".
  *     Dzięki temu nikt obcy nie wejdzie (3/3 zajęte), a gra liczy się zarówno do monet, jak i statystyk profilu!
- *  3. Jeśli HOST posiada cały zestaw kolorystyczny (monopol) i ma minimum $1500 gotówki, automatycznie
- *     kupuje domki/hotele na swoich polach, aby szybciej wykończyć boty i przyspieszyć grę.
- *  4. Przyspieszony cykl akcji (350ms) oraz zmniejszony limit rund do poddania (50 i 60 rund).
+ *  3. Żaden gracz nie buduje domków ani hoteli (kupowane są wyłącznie czyste pola miast/lotnisk/elektrowni).
+ *  4. Przyspieszony cykl akcji (350ms) oraz limit rund do poddania: 80 i 100 rund.
  */
 
 const { spawn } = require('child_process');
@@ -36,9 +35,8 @@ try {
 
 // ==================== KONFIGURACJA ====================
 const CONFIG = {
-  bot1SurrenderRound: 50,  // Bot 1 poddaje się po 50 swoich rundach (lub gdy zbankrutuje na czynszu)
-  bot2SurrenderRound: 60,  // Bot 2 poddaje się po 60 swoich rundach (lub gdy zbankrutuje na czynszu)
-  hostMinCashForHouses: 1500, // Host buduje domki/hotele na zestawach tylko gdy ma >= $1500
+  bot1SurrenderRound: 80,  // Bot 1 poddaje się po 80 swoich rundach
+  bot2SurrenderRound: 100, // Bot 2 poddaje się po 100 swoich rundach
   tickIntervalMs: 350,     // Przyspieszona pętla sprawdzania stanu gry (350ms)
   maxGameDurationMs: 35 * 60 * 1000, // Watchdog: max 35 minut na jedną grę
   chromePath: findChromePath(),
@@ -55,22 +53,22 @@ const CONFIG = {
     },
     {
       id: 'bot1',
-      name: 'BOT 1 (Gość - 50 rund)',
+      name: 'BOT 1 (Gość - 80 rund)',
       port: 9223,
       profileDir: path.join(__dirname, 'profiles', 'bot1'),
       windowPos: '640,0',
       windowSize: '640,900',
-      surrenderAtRound: 50,
+      surrenderAtRound: 80,
       preferredColorIndex: 3,
     },
     {
       id: 'bot2',
-      name: 'BOT 2 (Gość - 60 rund)',
+      name: 'BOT 2 (Gość - 100 rund)',
       port: 9224,
       profileDir: path.join(__dirname, 'profiles', 'bot2'),
       windowPos: '1280,0',
       windowSize: '640,900',
-      surrenderAtRound: 60,
+      surrenderAtRound: 100,
       preferredColorIndex: 7,
     },
   ],
@@ -899,8 +897,6 @@ function pageGameplayTick(params) {
   // 6. Rzut kostką: rozróżniamy pierwszy rzut w rundzie ("Roll the dice") od dubletu ("Roll again")
   const rollInitialBtn = findBtn(/roll the dice|roll dice|rzuć kostką|rzuć kośćmi/i);
   if (rollInitialBtn) {
-    window.__rbUpgradeTries = 0;
-    window.__rbLastOpenedPropIndex = -1;
     smartClick(rollInitialBtn);
     return { event: 'rolled_initial', label: (rollInitialBtn.innerText || '').trim() };
   }
@@ -911,92 +907,14 @@ function pageGameplayTick(params) {
     return { event: 'rolled_again', label: (rollAgainBtn.innerText || '').trim() };
   }
 
-  // 7. BUDOWANIE DOMKÓW / HOTELI PRZEZ HOSTA (gdy Host ma pełny zestaw kolorystyczny i gotówkę >= $1500)
+  // 7. Kończenie tury ("End turn")
   const endTurnBtn = findBtn(/end turn|zakończ turę/i);
-  if (
-    isHost &&
-    endTurnBtn &&
-    selfMoney !== null &&
-    !Number.isNaN(selfMoney) &&
-    selfMoney >= (minCashForHouses || 1500) &&
-    (window.__rbUpgradeTries || 0) < 10
-  ) {
-    // Jeśli przed chwilą kliknięto ulepszenie, daj serwerowi chwilę (600ms) na aktualizację poziomu domku
-    if (Date.now() - (window.__rbLastUpgradeClickAt || 0) < 600) {
-      return { event: 'waiting_upgrade_sync' };
-    }
-
-    // 7A. Jeśli na ekranie jest już otwarta karta właściwości z aktywnym przyciskiem Upgrade (pierwszy przycisk w ._9bzEapiJ)
-    const enabledUpgradeBtn = Array.from(document.querySelectorAll('._9bzEapiJ button:first-child')).find(
-      (b) => !b.disabled && isVisible(b)
-    );
-    if (enabledUpgradeBtn) {
-      window.__rbUpgradeTries = (window.__rbUpgradeTries || 0) + 1;
-      window.__rbLastUpgradeClickAt = Date.now();
-      smartClick(enabledUpgradeBtn);
-      return { event: 'upgraded_property', label: `Kasa: $${selfMoney}` };
-    }
-
-    // 7B. Przeszukaj posiadane właściwości w panelu "My properties" (.YTmH8X8Z) przez React Fiber
-    const propEls = Array.from(document.querySelectorAll('.YTmH8X8Z'));
-    const ownedCities = [];
-    for (const el of propEls) {
-      const fk = Object.keys(el).find((k) => k.startsWith('__reactFiber$'));
-      let fib = fk ? el[fk] : null;
-      for (let i = 0; i < 10 && fib; i++, fib = fib.return) {
-        const p = fib.memoizedProps;
-        if (p && p.property && typeof p.index === 'number') {
-          if (p.property.type === 'city') {
-            ownedCities.push({ el, property: p.property, index: p.index });
-          }
-          break;
-        }
-      }
-    }
-
-    // Grupuj miasta według kraju (zestawu kolorystycznego)
-    const byCountry = {};
-    for (const item of ownedCities) {
-      const cid = item.property.countryId || 'unknown';
-      if (!byCountry[cid]) byCountry[cid] = [];
-      byCountry[cid].push(item);
-    }
-
-    // Sprawdź, czy któryś kraj jest pełnym zestawem (2 miasta dla skrajnych zestawów na polach 1-3 oraz 37-39, 3 dla pozostałych)
-    for (const cid of Object.keys(byCountry)) {
-      const group = byCountry[cid];
-      const requiredCount = group.some((g) => g.index <= 3 || g.index >= 37) ? 2 : 3;
-      const anyMortgaged = group.some((g) => g.property.isMortgaged);
-      if (group.length >= requiredCount && !anyMortgaged) {
-        const minLevel = Math.min(...group.map((g) => g.property.level || 0));
-        if (minLevel < 5) {
-          const candidate = group.find(
-            (g) => (g.property.level || 0) === minLevel && g.index !== window.__rbLastOpenedPropIndex
-          );
-          if (candidate && candidate.el) {
-            const upgradeCost = minLevel + 1 === 5 ? candidate.property.hotelPrice : candidate.property.housePrice;
-            if (!upgradeCost || selfMoney >= Math.max(minCashForHouses || 1500, upgradeCost)) {
-              window.__rbUpgradeTries = (window.__rbUpgradeTries || 0) + 1;
-              window.__rbLastOpenedPropIndex = candidate.index;
-              candidate.el.scrollIntoView({ block: 'nearest' });
-              smartClick(candidate.el);
-              return { event: 'opened_property_for_upgrade', label: candidate.property.name };
-            }
-          }
-        }
-      }
-    }
-  }
-
-  // 8. Kończenie tury ("End turn")
   if (endTurnBtn) {
-    window.__rbUpgradeTries = 0;
-    window.__rbLastOpenedPropIndex = -1;
     smartClick(endTurnBtn);
     return { event: 'ended_turn', label: (endTurnBtn.innerText || '').trim() };
   }
 
-  // 9. Zamknięcie ewentualnych okienek informacyjnych ("OK", "Continue", "Got it")
+  // 8. Zamknięcie ewentualnych okienek informacyjnych ("OK", "Continue", "Got it")
   const okBtn = findBtn(/^(ok|continue|got it|rozumiem|dalej)$/i);
   if (okBtn) {
     smartClick(okBtn);
@@ -1031,10 +949,10 @@ class RichupOrchestrator {
 
   async start() {
     console.log('==============================================================');
-    console.log('  RICHUP.IO BOT NOCNY (TURBO FARMING + STATYSTYKI PROFILU)');
+    console.log('  RICHUP.IO BOT NOCNY (80 / 100 RUND + STATYSTYKI PROFILU)');
     console.log('  - Pokój 3/3 zamieniany na PUBLICZNY przed startem ($3000 na start)');
-    console.log('  - Host buduje domki/hotele na zestawach, gdy ma >= $1500');
-    console.log('  - Bot 1 poddaje się po 50 rundach | Bot 2 po 60 rundach');
+    console.log('  - Kupowanie czystych pól (BEZ budowania domków/hoteli)');
+    console.log('  - Bot 1 poddaje się po 80 rundach | Bot 2 po 100 rundach');
     console.log('  - Szybki cykl akcji (350ms)');
     console.log('==============================================================\n');
 
