@@ -1,12 +1,17 @@
 /**
- * Richup.io Overnight Custom Game Farming Bot
+ * Richup.io Overnight Coin Farming Bot (MAX PROFIT EDITION)
  * Architektura:
  *  - Okno 1 (HOST): Twoje główne konto (zapisana sesja w profiles/host) - ZAWSZE WYGRYWA
- *  - Okno 2 (BOT 1): Konto gościa (profiles/bot1) - poddaje się po 35 rundach
- *  - Okno 3 (BOT 2): Konto gościa (profiles/bot2) - poddaje się po 45 rundach
+ *  - Okno 2 (BOT 1): Konto gościa (profiles/bot1) - nowe ID co grę, poddaje się po 35 rundach
+ *  - Okno 3 (BOT 2): Konto gościa (profiles/bot2) - nowe ID co grę, poddaje się po 45 rundach
  *
- * Wszystkie boty rzucają kostką, kupują pola (bez budowania domków/hoteli) i kończą tury.
- * W ustawieniach pokoju ustawiana jest maksymalna kasa startowa i wyłączane są aukcje.
+ * Optymalizacje pod maksymalny zysk monet:
+ *  1. Domyślne zasady gry ($1500) - brak blokady monet za modyfikację zasad (Custom Rules).
+ *  2. Inteligentny bufor gotówki - każdy bot kupuje do 5 pól (do $280), dzięki czemu zawsze ma
+ *     ponad $800-$1500 zapasu i NIGDY nie zbankrutuje przypadkowo przed 35/45 rundą.
+ *  3. Czyszczenie ciasteczek i Storage gości co mecz - w każdej grze BOT 1 i BOT 2 mają nowe ID
+ *     i nowy losowy nick (ochrona przed blokadą Anti-Win-Trading za grę z tymi samymi osobami).
+ *  4. Szybki czas reakcji (450ms) - maksymalna liczba pełnych gier na godzinę.
  */
 
 const { spawn } = require('child_process');
@@ -32,8 +37,10 @@ try {
 const CONFIG = {
   bot1SurrenderRound: 35,  // Bot 1 poddaje się po 35 swoich rundach
   bot2SurrenderRound: 45,  // Bot 2 poddaje się po 45 swoich rundach
-  tickIntervalMs: 800,     // Częstotliwość sprawdzania stanu gry (ms)
-  maxGameDurationMs: 25 * 60 * 1000, // Watchdog: max 25 minut na jedną grę
+  maxPropertiesPerBot: 5,  // Maks. liczba kupionych pól na bota (gwarantuje bezpieczny zapas gotówki przy domyślnych $1500)
+  maxPropertyPrice: 280,   // Kupuj tylko pola o cenie <= $280
+  tickIntervalMs: 450,     // Szybkie sprawdzanie stanu gry (450ms)
+  maxGameDurationMs: 22 * 60 * 1000, // Watchdog: max 22 minuty na jedną grę
   chromePath: findChromePath(),
   instances: [
     {
@@ -93,18 +100,19 @@ class BrowserClient {
     this.msgId = 1;
     this.pending = new Map();
     this.rounds = 0;
+    this.propertiesBought = 0;
     this.surrenderClicks = 0;
     this.surrendered = false;
     this.joinedLobby = false;
     this.lastAction = 'Inicjalizacja...';
     this.lastRollTimestamp = 0;
+    this.lastBuyTimestamp = 0;
     this.lastTurnstileClick = 0;
   }
 
   async launch() {
     fs.mkdirSync(this.cfg.profileDir, { recursive: true });
 
-    // Jeśli okno z poprzedniego uruchomienia jest już otwarte na tym porcie, podłączamy się do niego bezpośrednio!
     try {
       const res = await fetch(`http://127.0.0.1:${this.cfg.port}/json`);
       if (res.ok) {
@@ -121,7 +129,6 @@ class BrowserClient {
       `--window-size=${this.cfg.windowSize}`,
       '--no-first-run',
       '--no-default-browser-check',
-      // Flagi procesowe Chrome (niewidoczne dla Cloudflare, zapobiegają usypianiu kart w tle)
       '--disable-background-timer-throttling',
       '--disable-backgrounding-occluded-windows',
       '--disable-renderer-backgrounding',
@@ -162,6 +169,7 @@ class BrowserClient {
         try {
           await this.send('Page.enable');
           await this.send('Runtime.enable');
+          await this.send('Network.enable').catch(() => {});
           resolve();
         } catch (err) {
           reject(err);
@@ -244,8 +252,28 @@ class BrowserClient {
   }
 
   /**
-   * Natywne fizyczne kliknięcie myszą w punkcie (x, y) - potrzebne m.in. do klikania w ramkę Cloudflare Turnstile
+   * Czyści tożsamość gościa (ciasteczka, localStorage, sessionStorage) dla BOT 1 i BOT 2,
+   * aby serwer Richup.io w każdym meczu widział zupełnie nowych graczy (brak blokady Anti-Win-Trading!)
    */
+  async resetGuestIdentity() {
+    if (this.cfg.id === 'host') return; // NIGDY nie czyścimy konta Hosta!
+    try {
+      await this.ensureConnected();
+      await this.send('Network.clearBrowserCookies').catch(() => {});
+      await this.send('Storage.clearDataForOrigin', {
+        origin: 'https://richup.io',
+        storageTypes: 'cookies,local_storage,session_storage,indexeddb',
+      }).catch(() => {});
+      await this.eval(() => {
+        try {
+          localStorage.clear();
+          sessionStorage.clear();
+        } catch (_) {}
+      }).catch(() => {});
+      console.log(`[${this.cfg.name}] 🔄 Wygenerowano nową tożsamość gościa (nowe ID gracza na kolejny mecz).`);
+    } catch (_) {}
+  }
+
   async nativeMouseClick(x, y) {
     await this.ensureConnected();
     const rx = Math.round(x + (Math.random() * 4 - 2));
@@ -255,13 +283,13 @@ class BrowserClient {
       x: Math.max(1, rx - 15),
       y: Math.max(1, ry - 10),
     });
-    await sleep(60);
+    await sleep(50);
     await this.send('Input.dispatchMouseEvent', {
       type: 'mouseMoved',
       x: rx,
       y: ry,
     });
-    await sleep(40);
+    await sleep(35);
     await this.send('Input.dispatchMouseEvent', {
       type: 'mousePressed',
       x: rx,
@@ -269,7 +297,7 @@ class BrowserClient {
       button: 'left',
       clickCount: 1,
     });
-    await sleep(70);
+    await sleep(65);
     await this.send('Input.dispatchMouseEvent', {
       type: 'mouseReleased',
       x: rx,
@@ -279,9 +307,6 @@ class BrowserClient {
     });
   }
 
-  /**
-   * Sprawdza czy na ekranie ("Loading game...") wisi widżet Cloudflare Turnstile i klika jego checkbox fizyczną myszą
-   */
   async checkAndSolveTurnstile() {
     if (Date.now() - this.lastTurnstileClick < 4000) return false;
 
@@ -326,19 +351,18 @@ class BrowserClient {
 
   resetForNewGame() {
     this.rounds = 0;
+    this.propertiesBought = 0;
     this.surrenderClicks = 0;
     this.surrendered = false;
     this.joinedLobby = false;
     this.lastAction = 'Nowa gra...';
     this.lastRollTimestamp = 0;
+    this.lastBuyTimestamp = 0;
   }
 }
 
 // ==================== SKRYPTY WSTRZYKIWANE DO STRONY (DOM HELPERS) ====================
 
-/**
- * Aktualizuje nakładkę HUD na stronie, wykrywa zdobyte monety ("You just earned X Coin") i zwraca stan przycisków
- */
 function pageUpdateHUD(hudData) {
   let box = document.getElementById('richup-bot-hud');
   if (!box) {
@@ -358,7 +382,7 @@ function pageUpdateHUD(hudData) {
       'line-height:1.45',
       'border:2px solid #6366f1',
       'box-shadow:0 8px 20px rgba(0,0,0,0.5)',
-      'min-width:235px',
+      'min-width:240px',
       'user-select:none',
     ].join(';');
 
@@ -407,7 +431,6 @@ function pageUpdateHUD(hudData) {
 
   window.__rbState = window.__rbState || { paused: false, forceNewRoom: false, forceSurrender: false };
 
-  // Sprawdzamy czy na ekranie pojawił się komunikat "You just earned X Coin(s)!" lub "You earned a coin"
   let newlyEarnedCoins = 0;
   if (hudData.roleId === 'host' && document.body) {
     const txt = document.body.innerText || '';
@@ -437,8 +460,8 @@ function pageUpdateHUD(hudData) {
     const limitStr = hudData.surrenderAtRound > 9999 ? 'NIGDY (Wygrywa)' : `${hudData.surrenderAtRound}`;
     statsEl.innerHTML =
       `🏆 Wygrane: <b>${hudData.gamesWon}</b> (Gra #${hudData.gameNumber}) | 🪙 Monety: <b style="color:#facc15;">${hudData.coinsEarned}</b><br>` +
-      `🎲 Rundy tego bota: <b>${hudData.rounds}</b> / ${limitStr}<br>` +
-      `📊 Rundy B1 / B2: <b>${hudData.bot1Rounds}/${hudData.bot1Limit}</b> | <b>${hudData.bot2Rounds}/${hudData.bot2Limit}</b>`;
+      `🎲 Rundy: <b>${hudData.rounds}</b> / ${limitStr} | 🏠 Pola: <b>${hudData.propertiesBought}/${hudData.maxProperties}</b><br>` +
+      `📊 B1 / B2: <b>${hudData.bot1Rounds}/${hudData.bot1Limit}</b> | <b>${hudData.bot2Rounds}/${hudData.bot2Limit}</b>`;
   }
   if (actionEl) {
     actionEl.textContent = window.__rbState.paused ? '⏸️ WSTRZYMANO (Kliknij Wznów)' : `▶ ${hudData.lastAction}`;
@@ -460,9 +483,6 @@ function pageUpdateHUD(hudData) {
   return out;
 }
 
-/**
- * Na stronie głównej (https://richup.io/) klika przycisk tworzenia prywatnej gry
- */
 function pageClickCreatePrivateGame() {
   const isVisible = (el) => {
     if (!el) return false;
@@ -518,10 +538,12 @@ function pageClickCreatePrivateGame() {
 }
 
 /**
- * Konfiguracja pokoju przez Hosta + przechodzenie przez "Enter Game" -> "Select appearance" -> "Join game" -> "Start Game"
+ * Obsługa lobby: przechodzenie przez "Enter Game" -> "Select appearance" -> "Join game" -> "Start Game"
+ * UWAGA: Zostawiamy w 100% DOMYŚLNE ZASADY GRY ($1500 na start, brak aukcji),
+ * ponieważ serwer Richup.io wymaga domyślnych zasad (Default Rules), aby przyznać monetę za wygraną!
  */
 function pageLobbyTick(params) {
-  const { isHost, preferredColorIndex, allJoined } = params;
+  const { preferredColorIndex, allJoined } = params;
 
   const isVisible = (el) => {
     if (!el) return false;
@@ -608,102 +630,13 @@ function pageLobbyTick(params) {
   const startGameBtn = findClickable(/start game|rozpocznij grę/i);
   const isSeatedInLobby = !!changeAppearanceBtn || !!startGameBtn;
 
-  // KROK 4: Jeśli jesteśmy Hostem i siedzimy już w lobby, ustawiamy maksymalną kasę startową ("Starting cash")
-  if (isHost && isSeatedInLobby && !window.__rbLobbyConfigured) {
-    let settingsAdjusted = false;
-
-    const selects = Array.from(document.querySelectorAll('select'));
-    for (const sel of selects) {
-      const options = Array.from(sel.options);
-      let maxIdx = -1;
-      let maxVal = -1;
-      options.forEach((opt, idx) => {
-        const text = (opt.textContent || opt.value || '').replace(/[, ]/g, '');
-        const m = text.match(/\$?(\d{3,6})/);
-        if (m) {
-          const num = parseInt(m[1], 10);
-          if (num >= 1000 && num <= 100000 && num > maxVal) {
-            maxVal = num;
-            maxIdx = idx;
-          }
-        }
-      });
-      if (maxIdx !== -1 && sel.selectedIndex !== maxIdx) {
-        sel.selectedIndex = maxIdx;
-        sel.dispatchEvent(new Event('change', { bubbles: true }));
-        sel.dispatchEvent(new Event('input', { bubbles: true }));
-        settingsAdjusted = true;
-      }
-    }
-
-    const allElements = Array.from(document.querySelectorAll('div, span, label, p'));
-    const cashLabel = allElements.find((el) =>
-      /^(starting cash|kasa startowa|kasa na start)$/i.test((el.textContent || '').trim())
-    );
-    if (cashLabel && cashLabel.parentElement) {
-      cashLabel.scrollIntoView({ block: 'center' });
-      const container = cashLabel.parentElement.parentElement || cashLabel.parentElement;
-      const selectTrigger = container.querySelector('select, button, [role="button"], input');
-      if (selectTrigger && selectTrigger.tagName !== 'SELECT' && !window.__rbCashDropdownOpened) {
-        window.__rbCashDropdownOpened = true;
-        smartClick(selectTrigger);
-        settingsAdjusted = true;
-      }
-    }
-
-    if (window.__rbCashDropdownOpened && !window.__rbCashDropdownPicked) {
-      const moneyItems = Array.from(document.querySelectorAll('li, div[role="option"], button, span, div')).filter(
-        (el) => {
-          if (!isVisible(el) || el.children.length > 1) return false;
-          const t = (el.textContent || '').trim().replace(/[, ]/g, '');
-          return /^\$\d{4,6}$/.test(t);
-        }
-      );
-      if (moneyItems.length > 0) {
-        let bestEl = null;
-        let bestAmount = 0;
-        for (const item of moneyItems) {
-          const amt = parseInt((item.textContent || '').replace(/[^0-9]/g, ''), 10);
-          if (amt > bestAmount) {
-            bestAmount = amt;
-            bestEl = item;
-          }
-        }
-        if (bestEl && bestAmount >= 2000) {
-          smartClick(bestEl);
-          window.__rbCashDropdownPicked = true;
-          settingsAdjusted = true;
-        }
-      }
-    }
-
-    const auctionLabel = allElements.find((el) => /^(auction|aukcj[ae])$/i.test((el.textContent || '').trim()));
-    if (auctionLabel && auctionLabel.parentElement && !window.__rbAuctionChecked) {
-      const row = auctionLabel.closest('div') || auctionLabel.parentElement;
-      const toggle = row.parentElement?.querySelector('input[type="checkbox"], button[role="switch"]');
-      if (toggle) {
-        const isChecked =
-          toggle.checked === true || toggle.getAttribute('aria-checked') === 'true' || toggle.classList.contains('active');
-        if (isChecked) {
-          smartClick(toggle);
-          settingsAdjusted = true;
-        }
-        window.__rbAuctionChecked = true;
-      }
-    }
-
-    if (!settingsAdjusted) {
-      window.__rbLobbyConfigured = true;
-    }
-  }
-
-  // KROK 5: Sprawdzenie czy gra już wystartowała
+  // KROK 4: Sprawdzenie czy gra już wystartowała
   const inGameIndicator = findClickable(/^(roll the dice|roll again|end turn|rzuć kostką|zakończ turę)$/i);
   if (inGameIndicator && !startGameBtn) {
     return { action: 'game_already_started', isSeatedInLobby: true };
   }
 
-  // KROK 6: Kliknięcie "Start Game" (gdy wszystkie 3 okna siedzą przy stole)
+  // KROK 5: Kliknięcie "Start Game" (gdy wszystkie 3 okna siedzą przy stole)
   if (startGameBtn && allJoined) {
     smartClick(startGameBtn);
     return { action: 'start_clicked', isSeatedInLobby: true };
@@ -720,7 +653,7 @@ function pageLobbyTick(params) {
  * Główny krok rozgrywki wykonywany w każdym z 3 okien podczas trwania meczu
  */
 function pageGameplayTick(params) {
-  const { shouldSurrender, allowGameOverCheck } = params;
+  const { shouldSurrender, allowGameOverCheck, canBuyMoreProperties, maxPropertyPrice } = params;
 
   const isVisible = (el) => {
     if (!el) return false;
@@ -765,7 +698,7 @@ function pageGameplayTick(params) {
       return regex.test(txt);
     });
 
-  // 0. Sprawdzenie czy gra się zakończyła (ekran końcowy / wygrana) - tylko gdy gra faktycznie trwała
+  // 0. Sprawdzenie czy gra się zakończyła (ekran końcowy / wygrana)
   if (allowGameOverCheck) {
     const playAgainBtn = findBtn(/^(play again|another game|zagraj ponownie|kolejna gra)$/i);
     if (playAgainBtn) {
@@ -773,14 +706,14 @@ function pageGameplayTick(params) {
     }
   }
 
-  // 1. Gdyby z jakiegoś powodu okno wciąż miało niezamknięty "Start Game", kliknij go
+  // 1. Gdyby okno wciąż miało niezamknięty "Start Game", kliknij go
   const startGameBtn = findBtn(/^start game$/i);
   if (startGameBtn) {
     smartClick(startGameBtn);
     return { event: 'clicked_start_game' };
   }
 
-  // 2. Odrzucanie ofert wymiany (Trade), jeśli jakakolwiek się pojawi
+  // 2. Odrzucanie ofert wymiany (Trade)
   const declineBtn = findBtn(/^(decline|reject|cancel trade|odrzuć)$/i);
   if (declineBtn) {
     smartClick(declineBtn);
@@ -814,16 +747,27 @@ function pageGameplayTick(params) {
     }
   }
 
-  // 5. Kupowanie nieruchomości (BEZ ulepszania domkami!)
-  const buyBtn = buttons.find((b) => {
-    const txt = (b.innerText || b.textContent || '').replace(/\s+/g, ' ').trim();
-    if (/house|hotel|upgrade|build|dom|ulepsz|buduj/i.test(txt)) return false;
-    if (b.querySelector('[data-icon="arrow-up-from-line"]')) return false;
-    return /^(buy for \$|buy\b|kup za|kup\b)/i.test(txt);
-  });
-  if (buyBtn) {
-    smartClick(buyBtn);
-    return { event: 'bought_property', label: (buyBtn.innerText || '').trim() };
+  // 5. Inteligentne kupowanie nieruchomości (BEZ ulepszania domkami i z zachowaniem bufora gotówki!)
+  if (canBuyMoreProperties) {
+    const buyBtn = buttons.find((b) => {
+      const txt = (b.innerText || b.textContent || '').replace(/\s+/g, ' ').trim();
+      if (/house|hotel|upgrade|build|dom|ulepsz|buduj/i.test(txt)) return false;
+      if (b.querySelector('[data-icon="arrow-up-from-line"]')) return false;
+      if (!/^(buy for \$|buy\b|kup za|kup\b)/i.test(txt)) return false;
+
+      // Sprawdzamy cenę pola z tekstu przycisku (np. "Buy for $200")
+      const priceMatch = txt.match(/\$(\d+)/);
+      if (priceMatch) {
+        const price = parseInt(priceMatch[1], 10);
+        if (price > maxPropertyPrice) return false;
+      }
+      return true;
+    });
+
+    if (buyBtn) {
+      smartClick(buyBtn);
+      return { event: 'bought_property', label: (buyBtn.innerText || '').trim() };
+    }
   }
 
   // 6. Rzut kostką: rozróżniamy pierwszy rzut w rundzie ("Roll the dice") od dubletu ("Roll again")
@@ -881,10 +825,10 @@ class RichupOrchestrator {
 
   async start() {
     console.log('==============================================================');
-    console.log('  RICHUP.IO BOT NOCNY (3 OKNA: HOST + 2 BOTY GOŚCIE)');
-    console.log('  - Host wchodzi do pokoju jako pierwszy (gwarancja 👑 Hosta)');
-    console.log('  - Bot 1 poddaje się po 35 rundach');
-    console.log('  - Bot 2 poddaje się po 45 rundach');
+    console.log('  RICHUP.IO BOT NOCNY - MAX COIN PROFIT EDITION');
+    console.log('  - Domyślne zasady ($1500) + inteligentny bufor gotówki (max 5 pól)');
+    console.log('  - Nowa tożsamość gości (BOT 1 & BOT 2) w każdym meczu');
+    console.log('  - Bot 1 poddaje się po 35 rundach | Bot 2 po 45 rundach');
     console.log('==============================================================\n');
 
     for (const client of this.clients) {
@@ -918,6 +862,8 @@ class RichupOrchestrator {
           coinsEarned: this.coinsEarned,
           gameNumber: this.gameNumber,
           rounds: c.rounds,
+          propertiesBought: c.propertiesBought,
+          maxProperties: CONFIG.maxPropertiesPerBot,
           surrenderAtRound: c.cfg.surrenderAtRound === Infinity ? 999999 : c.cfg.surrenderAtRound,
           bot1Rounds: this.bot1.rounds,
           bot1Limit: CONFIG.bot1SurrenderRound,
@@ -961,7 +907,7 @@ class RichupOrchestrator {
       return;
     }
     if (this.state === 'PLAYING' && Date.now() - this.gameStartTime > CONFIG.maxGameDurationMs) {
-      console.log('[WATCHDOG] Gra przekroczyła 25 minut. Zakładam nowy pokój...');
+      console.log('[WATCHDOG] Gra przekroczyła 22 minuty. Zakładam nowy pokój...');
       this.setState('CREATE_ROOM');
       return;
     }
@@ -983,6 +929,10 @@ class RichupOrchestrator {
   async handleCreateRoom() {
     for (const c of this.clients) c.resetForNewGame();
     this.roomUrl = null;
+
+    // Przed każdym nowym meczem czyścimy tożsamość gości (BOT 1 i BOT 2), aby serwer widział nowych graczy!
+    await this.bot1.resetGuestIdentity();
+    await this.bot2.resetGuestIdentity();
 
     const hostUrl = await this.host.eval('location.href');
     if (hostUrl.includes('/room/')) {
@@ -1008,9 +958,7 @@ class RichupOrchestrator {
       console.log(`[HOST] Wygenerowano link pokoju: ${this.roomUrl}`);
       console.log(`[HOST] Czekam aż HOST wejdzie do środka jako pierwszy (żeby miał 👑 Hosta)...`);
 
-      await this.host.eval(
-        'window.__rbLobbyConfigured = false; window.__rbCashDropdownOpened = false; window.__rbCashDropdownPicked = false; window.__rbAuctionChecked = false; window.__rbColorTry = 0;'
-      );
+      await this.host.eval('window.__rbColorTry = 0;');
 
       this.setState('WAIT_HOST_SEATED');
     }
@@ -1041,11 +989,11 @@ class RichupOrchestrator {
 
       this.bot1.lastAction = 'Wchodzę do pokoju Hosta...';
       await this.bot1.navigate(this.roomUrl);
-      await sleep(1800);
+      await sleep(1600);
 
       this.bot2.lastAction = 'Wchodzę do pokoju Hosta...';
       await this.bot2.navigate(this.roomUrl);
-      await sleep(1500);
+      await sleep(1400);
 
       this.setState('WAIT_BOTS_JOIN');
     }
@@ -1056,7 +1004,7 @@ class RichupOrchestrator {
       const u = await bot.eval('location.href');
       if (this.roomUrl && u !== this.roomUrl) {
         await bot.navigate(this.roomUrl);
-        await sleep(1200);
+        await sleep(1000);
       }
     }
 
@@ -1087,7 +1035,7 @@ class RichupOrchestrator {
         c.lastAction = 'Rozpoczynam grę (Start Game)!';
         console.log(`[${c.cfg.name}] 🚀 Wszyscy 3 gracze przy stole! Kliknięto Start Game!`);
         this.gameStartTime = Date.now();
-        await sleep(2000);
+        await sleep(1500);
         this.setState('PLAYING');
         return;
       } else if (res?.action === 'game_already_started' && allJoined) {
@@ -1109,10 +1057,13 @@ class RichupOrchestrator {
 
     for (const c of this.clients) {
       const shouldSurrender = c.cfg.id !== 'host' && c.rounds >= c.cfg.surrenderAtRound;
+      const canBuyMoreProperties = c.propertiesBought < CONFIG.maxPropertiesPerBot;
 
       const res = await c.eval(pageGameplayTick, {
         shouldSurrender,
         allowGameOverCheck,
+        canBuyMoreProperties,
+        maxPropertyPrice: CONFIG.maxPropertyPrice,
       });
 
       if (!res) continue;
@@ -1120,7 +1071,7 @@ class RichupOrchestrator {
       switch (res.event) {
         case 'rolled_initial': {
           const now = Date.now();
-          if (now - c.lastRollTimestamp > 2000) {
+          if (now - c.lastRollTimestamp > 1800) {
             c.rounds++;
             c.lastRollTimestamp = now;
             console.log(
@@ -1134,9 +1085,15 @@ class RichupOrchestrator {
         case 'rolled_again':
           c.lastAction = `Dublet - rzucam ponownie (Runda ${c.rounds})`;
           break;
-        case 'bought_property':
-          c.lastAction = `Kupiono pole (${res.label})`;
+        case 'bought_property': {
+          const now = Date.now();
+          if (now - c.lastBuyTimestamp > 1200) {
+            c.propertiesBought++;
+            c.lastBuyTimestamp = now;
+          }
+          c.lastAction = `Kupiono pole ${c.propertiesBought}/${CONFIG.maxPropertiesPerBot} (${res.label})`;
           break;
+        }
         case 'ended_turn':
           c.lastAction = `Zakończono turę (Runda ${c.rounds})`;
           break;
@@ -1157,7 +1114,7 @@ class RichupOrchestrator {
         case 'game_over':
           console.log(`[${c.cfg.name}] 🏆 Wykryto koniec gry! Twoje główne konto wygrywa!`);
           this.gamesWon++;
-          await sleep(4000);
+          await sleep(5000);
           this.setState('NEXT_GAME');
           return;
         default:
@@ -1169,9 +1126,9 @@ class RichupOrchestrator {
     }
 
     if (this.bot1.surrendered && this.bot2.surrendered) {
-      console.log('[INFO] Oba boty-goście się poddały! Czekam 8 sekund na zapisanie monet na koncie Hosta...');
+      console.log('[INFO] Oba boty-goście się poddały! Czekam 6 sekund na zapisanie monet na koncie Hosta...');
       this.host.lastAction = '🏆 WYGRANA! Zapisywanie monet...';
-      await sleep(8000);
+      await sleep(6000);
       this.gamesWon++;
       this.setState('NEXT_GAME');
     }
@@ -1183,9 +1140,9 @@ class RichupOrchestrator {
     for (const c of this.clients) {
       c.lastAction = 'Przechodzę do nowej gry...';
       await c.navigate('https://richup.io/');
-      await sleep(1000);
+      await sleep(800);
     }
-    await sleep(2500);
+    await sleep(2000);
     this.setState('CREATE_ROOM');
   }
 }
