@@ -532,22 +532,17 @@ function pageLobbyTick(params) {
 
   const isVisible = (el) => {
     if (!el) return false;
+    // Ignoruj ukryty overlay dołączania (.KdB0kL15 bez klasy .ExumLxlw)
+    if (el.closest('.KdB0kL15:not(.ExumLxlw)')) return false;
     const rect = el.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) return false;
-    let cur = el;
-    while (cur && cur !== document.body) {
-      const style = getComputedStyle(cur);
-      if (
-        style.display === 'none' ||
-        style.visibility === 'hidden' ||
-        parseFloat(style.opacity) === 0 ||
-        style.pointerEvents === 'none'
-      ) {
-        return false;
-      }
-      cur = cur.parentElement;
-    }
-    return true;
+    const style = getComputedStyle(el);
+    return (
+      rect.width > 0 &&
+      rect.height > 0 &&
+      style.visibility !== 'hidden' &&
+      style.display !== 'none' &&
+      style.opacity !== '0'
+    );
   };
 
   const smartClick = (el) => {
@@ -560,27 +555,33 @@ function pageLobbyTick(params) {
   };
 
   const setReactSelectValue = (sel, newVal) => {
+    // 1. Wywołaj bezpośrednio props.onChange komponentu oI przez React Fiber
+    const fk = Object.keys(sel).find((k) => k.startsWith('__reactFiber$'));
+    let fib = fk ? sel[fk] : null;
+    for (let i = 0; i < 6 && fib; i++, fib = fib.return) {
+      if (Array.isArray(fib.memoizedProps?.options) && typeof fib.memoizedProps?.onChange === 'function') {
+        fib.memoizedProps.onChange(String(newVal));
+        return true;
+      }
+    }
+    // 2. Fallback przez __reactProps$ na elemencie <select>
     const propKey = Object.keys(sel).find((k) => k.startsWith('__reactProps$'));
     if (propKey && typeof sel[propKey]?.onChange === 'function') {
       sel[propKey].onChange({ target: { value: String(newVal) } });
       return true;
     }
-    const oldVal = sel.value;
-    const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value')?.set;
-    if (nativeSetter) nativeSetter.call(sel, String(newVal));
-    else sel.value = String(newVal);
-    if (sel._valueTracker) sel._valueTracker.setValue(oldVal);
+    sel.value = String(newVal);
     sel.dispatchEvent(new Event('change', { bubbles: true }));
     return true;
   };
 
-  const getToggleState = (btn) => {
+  const getToggleFiberProps = (btn) => {
     if (!btn) return null;
     const fk = Object.keys(btn).find((k) => k.startsWith('__reactFiber$'));
     let fib = fk ? btn[fk] : null;
     for (let i = 0; i < 6 && fib; i++, fib = fib.return) {
       if (typeof fib.memoizedProps?.isOn === 'boolean') {
-        return fib.memoizedProps.isOn;
+        return fib.memoizedProps;
       }
     }
     return null;
@@ -680,7 +681,7 @@ function pageLobbyTick(params) {
     return { action: 'game_already_started', isSeatedInLobby: true };
   }
 
-  // KROK 5 (HOST): Konfiguracja ustawień pokoju (po jednym ustawieniu na tick, czekając na "Updating settings...")
+  // KROK 5 (HOST): Konfiguracja ustawień pokoju (z limitem prób, aby nigdy nie zablokować Start Game)
   if (isHost && isSeatedInLobby) {
     // 5A. Jeśli otwarte jest okienko potwierdzenia "Make public", kliknij je od razu!
     const makePublicModalBtn = findClickable(/^make public$/i);
@@ -689,64 +690,67 @@ function pageLobbyTick(params) {
       return { action: 'make_public_confirmed', isSeatedInLobby: true };
     }
 
-    // Jeśli serwer aktualizuje jeszcze poprzednie ustawienie, poczekaj do następnego ticku
-    if (/updating settings/i.test(bodyText)) {
-      return { action: 'updating_settings', isSeatedInLobby: true };
-    }
-
     const selects = Array.from(document.querySelectorAll('select')).filter((s) => !s.disabled);
 
-    // 5B. Ustaw "Maximum players" = 3
-    for (const sel of selects) {
-      const optValues = Array.from(sel.options).map((o) => o.value);
-      if (optValues.includes('2') && optValues.includes('3') && optValues.includes('4') && sel.value !== '3') {
-        setReactSelectValue(sel, '3');
-        return { action: 'max_players_set_3', isSeatedInLobby: true };
+    // 5B. Ustaw "Maximum players" = 3 (maksymalnie 2 próby na pokój)
+    if ((window.__rbTriesMaxPlayers || 0) < 2) {
+      for (const sel of selects) {
+        const optValues = Array.from(sel.options).map((o) => o.value);
+        if (optValues.includes('2') && optValues.includes('3') && optValues.includes('4') && sel.value !== '3') {
+          window.__rbTriesMaxPlayers = (window.__rbTriesMaxPlayers || 0) + 1;
+          setReactSelectValue(sel, '3');
+          return { action: 'max_players_set_3', isSeatedInLobby: true };
+        }
       }
     }
 
-    // 5C. Ustaw "Starting cash" = $3000
-    for (const sel of selects) {
-      const optValues = Array.from(sel.options).map((o) => o.value);
-      if (optValues.includes('1500') && optValues.includes('3000') && sel.value !== '3000') {
-        setReactSelectValue(sel, '3000');
-        return { action: 'starting_cash_set_3000', isSeatedInLobby: true };
+    // 5C. Ustaw "Starting cash" = $3000 (maksymalnie 2 próby na pokój)
+    if ((window.__rbTriesCash || 0) < 2) {
+      for (const sel of selects) {
+        const optValues = Array.from(sel.options).map((o) => o.value);
+        if (optValues.includes('1500') && optValues.includes('3000') && sel.value !== '3000') {
+          window.__rbTriesCash = (window.__rbTriesCash || 0) + 1;
+          setReactSelectValue(sel, '3000');
+          return { action: 'starting_cash_set_3000', isSeatedInLobby: true };
+        }
       }
     }
 
     // 5D. Upewnij się, że "Allow bots to join" jest wyłączone (OFF)
-    const botsToggleBtn = document.querySelector('button[aria-label="Allow bots to join"]');
-    if (botsToggleBtn && !botsToggleBtn.disabled && getToggleState(botsToggleBtn) === true) {
-      smartClick(botsToggleBtn);
-      return { action: 'bots_disabled', isSeatedInLobby: true };
+    if ((window.__rbTriesBots || 0) < 2) {
+      const botsToggleBtn = document.querySelector('button[aria-label="Allow bots to join"]');
+      const botsProps = getToggleFiberProps(botsToggleBtn);
+      if (botsToggleBtn && !botsToggleBtn.disabled && botsProps?.isOn === true) {
+        window.__rbTriesBots = (window.__rbTriesBots || 0) + 1;
+        smartClick(botsToggleBtn);
+        return { action: 'bots_disabled', isSeatedInLobby: true };
+      }
     }
 
     // 5E. Gdy wszystkie 3 okna siedzą przy stole (3/3), przełącz "Private room" -> OFF ("Make public") i kliknij "Start Game"
     if (allJoined) {
-      let privateToggleBtn = null;
-      for (const btn of Array.from(document.querySelectorAll('button'))) {
-        if (getToggleState(btn) === null) continue;
-        let cur = btn.parentElement;
-        for (let i = 0; i < 5 && cur; i++, cur = cur.parentElement) {
-          const txt = (cur.innerText || '').trim();
-          if (/^Private room\b/i.test(txt)) {
-            privateToggleBtn = btn;
-            break;
+      if ((window.__rbMakePublicTries || 0) < 2) {
+        let privateToggleBtn = null;
+        for (const btn of Array.from(document.querySelectorAll('button'))) {
+          if (!getToggleFiberProps(btn)) continue;
+          let cur = btn.parentElement;
+          for (let i = 0; i < 5 && cur; i++, cur = cur.parentElement) {
+            const txt = (cur.innerText || '').trim();
+            if (/^Private room\b/i.test(txt)) {
+              privateToggleBtn = btn;
+              break;
+            }
           }
+          if (privateToggleBtn) break;
         }
-        if (privateToggleBtn) break;
-      }
 
-      const isPrivateOn = getToggleState(privateToggleBtn);
-      if (
-        privateToggleBtn &&
-        !privateToggleBtn.disabled &&
-        isPrivateOn === true &&
-        (window.__rbMakePublicTries || 0) < 3
-      ) {
-        window.__rbMakePublicTries = (window.__rbMakePublicTries || 0) + 1;
-        smartClick(privateToggleBtn);
-        return { action: 'toggled_private_off', isSeatedInLobby: true };
+        const privProps = getToggleFiberProps(privateToggleBtn);
+        if (privateToggleBtn && !privateToggleBtn.disabled && privProps?.isOn === true) {
+          window.__rbMakePublicTries = (window.__rbMakePublicTries || 0) + 1;
+          if (typeof privProps.onClick === 'function') privProps.onClick();
+          else smartClick(privateToggleBtn);
+          return { action: 'toggled_private_off', isSeatedInLobby: true };
+        }
       }
 
       if (startGameBtn) {
@@ -771,22 +775,16 @@ function pageGameplayTick(params) {
 
   const isVisible = (el) => {
     if (!el) return false;
+    if (el.closest('.KdB0kL15:not(.ExumLxlw)')) return false;
     const rect = el.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) return false;
-    let cur = el;
-    while (cur && cur !== document.body) {
-      const style = getComputedStyle(cur);
-      if (
-        style.display === 'none' ||
-        style.visibility === 'hidden' ||
-        parseFloat(style.opacity) === 0 ||
-        style.pointerEvents === 'none'
-      ) {
-        return false;
-      }
-      cur = cur.parentElement;
-    }
-    return true;
+    const style = getComputedStyle(el);
+    return (
+      rect.width > 0 &&
+      rect.height > 0 &&
+      style.visibility !== 'hidden' &&
+      style.display !== 'none' &&
+      style.opacity !== '0'
+    );
   };
 
   const smartClick = (el) => {
@@ -1161,7 +1159,9 @@ class RichupOrchestrator {
       console.log(`[HOST] Wygenerowano link pokoju: ${this.roomUrl}`);
       console.log(`[HOST] Czekam aż HOST wejdzie do środka jako pierwszy (żeby miał 👑 Hosta)...`);
 
-      await this.host.eval('window.__rbColorTry = 0; window.__rbMakePublicTries = 0;');
+      await this.host.eval(
+        'window.__rbColorTry = 0; window.__rbTriesMaxPlayers = 0; window.__rbTriesCash = 0; window.__rbTriesBots = 0; window.__rbMakePublicTries = 0;'
+      );
 
       this.setState('WAIT_HOST_SEATED');
     }
