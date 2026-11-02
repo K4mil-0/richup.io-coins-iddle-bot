@@ -686,9 +686,10 @@ function pageLobbyTick(params) {
       return { action: 'make_public_confirmed', isSeatedInLobby: true };
     }
 
-    // Odczekaj 900ms po poprzedniej zmianie ustawienia (lub dopóki widoczny jest napis "Updating settings...")
+    // UWAGA: Napis "Updating settings..." jest ZAWSZE w DOM (ukryty przez opacity: 0), więc NIE sprawdzamy bodyText!
+    // Zamiast tego czekamy dokładnie 900ms po każdej faktycznej zmianie ustawienia:
     const timeSinceLastSetting = Date.now() - (window.__rbLastSettingAt || 0);
-    if (/updating settings/i.test(bodyText) || timeSinceLastSetting < 900) {
+    if (timeSinceLastSetting < 900) {
       return { action: 'updating_settings', isSeatedInLobby: true };
     }
 
