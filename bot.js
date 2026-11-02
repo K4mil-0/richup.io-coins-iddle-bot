@@ -553,22 +553,19 @@ function pageLobbyTick(params) {
   };
 
   const setReactSelectValue = (sel, newVal) => {
-    // 1. Wywołaj bezpośrednio props.onChange komponentu oI przez React Fiber
-    const fk = Object.keys(sel).find((k) => k.startsWith('__reactFiber$'));
-    let fib = fk ? sel[fk] : null;
-    for (let i = 0; i < 6 && fib; i++, fib = fib.return) {
-      if (Array.isArray(fib.memoizedProps?.options) && typeof fib.memoizedProps?.onChange === 'function') {
-        fib.memoizedProps.onChange(String(newVal));
-        return true;
-      }
-    }
-    // 2. Fallback przez __reactProps$ na elemencie <select>
+    const strVal = String(newVal);
+    // WAŻNE: W React 18 __reactFiber$ na węźle DOM wskazuje na drzewo z pierwszego renderu (gdy canEdit było false!).
+    // Natomiast __reactProps$ jest aktualizowane przez Reacta (updateFiberProps) przy KAŻDYM renderze!
     const propKey = Object.keys(sel).find((k) => k.startsWith('__reactProps$'));
     if (propKey && typeof sel[propKey]?.onChange === 'function') {
-      sel[propKey].onChange({ target: { value: String(newVal) } });
+      sel[propKey].onChange({ target: { value: strVal }, currentTarget: { value: strVal } });
       return true;
     }
-    sel.value = String(newVal);
+    const oldVal = sel.value;
+    const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value')?.set;
+    if (nativeSetter) nativeSetter.call(sel, strVal);
+    else sel.value = strVal;
+    if (sel._valueTracker) sel._valueTracker.setValue(oldVal);
     sel.dispatchEvent(new Event('change', { bubbles: true }));
     return true;
   };
@@ -679,59 +676,46 @@ function pageLobbyTick(params) {
     return { action: 'game_already_started', isSeatedInLobby: true };
   }
 
-  // KROK 5 (HOST): Konfiguracja ustawień pokoju (czekając aż zniknie e.isLoading / "Updating settings...")
+  // KROK 5 (HOST): Konfiguracja ustawień pokoju (czekając aż zniknie "Updating settings..." i 900ms między zmianami)
   if (isHost && isSeatedInLobby) {
     // 5A. Jeśli otwarte jest okienko potwierdzenia "Make public", kliknij je od razu!
     const makePublicModalBtn = findClickable(/^make public$/i);
     if (makePublicModalBtn) {
+      window.__rbLastSettingAt = Date.now();
       smartClick(makePublicModalBtn);
       return { action: 'make_public_confirmed', isSeatedInLobby: true };
     }
 
-    // Sprawdź bezpośrednio w React Fiber (.xZ3-HzVs -> yg.props.isLoading), czy trwa zapisywanie poprzedniego ustawienia
-    let isUpdatingSettings = /updating settings/i.test(bodyText);
-    const settingsCont = document.querySelector('.xZ3-HzVs');
-    if (settingsCont) {
-      const fk = Object.keys(settingsCont).find((k) => k.startsWith('__reactFiber$'));
-      let fib = fk ? settingsCont[fk] : null;
-      for (let i = 0; i < 6 && fib; i++, fib = fib.return) {
-        if (typeof fib.memoizedProps?.isLoading === 'boolean') {
-          if (fib.memoizedProps.isLoading) isUpdatingSettings = true;
-          break;
-        }
-      }
-    }
-
-    if (isUpdatingSettings && (window.__rbLoadingWaitTicks || 0) < 25) {
-      window.__rbLoadingWaitTicks = (window.__rbLoadingWaitTicks || 0) + 1;
+    // Odczekaj 900ms po poprzedniej zmianie ustawienia (lub dopóki widoczny jest napis "Updating settings...")
+    const timeSinceLastSetting = Date.now() - (window.__rbLastSettingAt || 0);
+    if (/updating settings/i.test(bodyText) || timeSinceLastSetting < 900) {
       return { action: 'updating_settings', isSeatedInLobby: true };
     }
-    window.__rbLoadingWaitTicks = 0;
 
     const selects = Array.from(document.querySelectorAll('select')).filter((s) => !s.disabled);
+    const startingCashSel = selects.find((sel) => {
+      const optValues = Array.from(sel.options).map((o) => o.value);
+      return optValues.includes('1500') && optValues.includes('3000');
+    });
+    const maxPlayersSel = selects.find((sel) => {
+      const optValues = Array.from(sel.options).map((o) => o.value);
+      return optValues.includes('2') && optValues.includes('3') && optValues.includes('4');
+    });
 
     // 5B. PRIORYTET #1: Ustaw "Starting cash" = $3000
-    if ((window.__rbTriesCash || 0) < 4) {
-      for (const sel of selects) {
-        const optValues = Array.from(sel.options).map((o) => o.value);
-        if (optValues.includes('1500') && optValues.includes('3000') && sel.value !== '3000') {
-          window.__rbTriesCash = (window.__rbTriesCash || 0) + 1;
-          setReactSelectValue(sel, '3000');
-          return { action: 'starting_cash_set_3000', isSeatedInLobby: true };
-        }
-      }
+    if (startingCashSel && startingCashSel.value !== '3000' && (window.__rbTriesCash || 0) < 5) {
+      window.__rbTriesCash = (window.__rbTriesCash || 0) + 1;
+      window.__rbLastSettingAt = Date.now();
+      setReactSelectValue(startingCashSel, '3000');
+      return { action: 'starting_cash_set_3000', isSeatedInLobby: true };
     }
 
     // 5C. PRIORYTET #2: Ustaw "Maximum players" = 3
-    if ((window.__rbTriesMaxPlayers || 0) < 4) {
-      for (const sel of selects) {
-        const optValues = Array.from(sel.options).map((o) => o.value);
-        if (optValues.includes('2') && optValues.includes('3') && optValues.includes('4') && sel.value !== '3') {
-          window.__rbTriesMaxPlayers = (window.__rbTriesMaxPlayers || 0) + 1;
-          setReactSelectValue(sel, '3');
-          return { action: 'max_players_set_3', isSeatedInLobby: true };
-        }
-      }
+    if (maxPlayersSel && maxPlayersSel.value !== '3' && (window.__rbTriesMaxPlayers || 0) < 5) {
+      window.__rbTriesMaxPlayers = (window.__rbTriesMaxPlayers || 0) + 1;
+      window.__rbLastSettingAt = Date.now();
+      setReactSelectValue(maxPlayersSel, '3');
+      return { action: 'max_players_set_3', isSeatedInLobby: true };
     }
 
     // 5D. Upewnij się, że "Allow bots to join" jest wyłączone (OFF)
@@ -740,14 +724,28 @@ function pageLobbyTick(params) {
       const botsProps = getToggleFiberProps(botsToggleBtn);
       if (botsToggleBtn && !botsToggleBtn.disabled && botsProps?.isOn === true) {
         window.__rbTriesBots = (window.__rbTriesBots || 0) + 1;
+        window.__rbLastSettingAt = Date.now();
         smartClick(botsToggleBtn);
         return { action: 'bots_disabled', isSeatedInLobby: true };
       }
     }
 
-    // 5E. Gdy wszystkie 3 okna siedzą przy stole (3/3), przełącz "Private room" -> OFF ("Make public") i kliknij "Start Game"
+    // 5E. Gdy wszystkie 3 okna siedzą przy stole (3/3):
+    //     TYLKO jeśli potwierdzono w DOM, że Maximum players === '3', Starting cash === '3000' oraz przy stole siedzą 3 osoby,
+    //     przełącz "Private room" -> OFF ("Make public") i kliknij "Start Game"!
     if (allJoined) {
-      if ((window.__rbMakePublicTries || 0) < 3) {
+      const seatedCount = document.querySelectorAll('[data-is-me]').length;
+      const isMaxPlayersConfirmed3 = !!maxPlayersSel && maxPlayersSel.value === '3';
+      const isCashConfirmed3000 = !!startingCashSel && startingCashSel.value === '3000';
+      const isRoomStillPrivate = /The host can remove players who run out of time/i.test(bodyText);
+
+      if (
+        isMaxPlayersConfirmed3 &&
+        isCashConfirmed3000 &&
+        seatedCount === 3 &&
+        isRoomStillPrivate &&
+        (window.__rbMakePublicTries || 0) < 3
+      ) {
         let privateToggleBtn = null;
         for (const btn of Array.from(document.querySelectorAll('button'))) {
           if (!getToggleFiberProps(btn)) continue;
@@ -762,11 +760,10 @@ function pageLobbyTick(params) {
           if (privateToggleBtn) break;
         }
 
-        const privProps = getToggleFiberProps(privateToggleBtn);
-        if (privateToggleBtn && !privateToggleBtn.disabled && privProps?.isOn === true) {
+        if (privateToggleBtn && !privateToggleBtn.disabled) {
           window.__rbMakePublicTries = (window.__rbMakePublicTries || 0) + 1;
-          if (typeof privProps.onClick === 'function') privProps.onClick();
-          else smartClick(privateToggleBtn);
+          window.__rbLastSettingAt = Date.now();
+          smartClick(privateToggleBtn);
           return { action: 'toggled_private_off', isSeatedInLobby: true };
         }
       }
@@ -1098,7 +1095,7 @@ class RichupOrchestrator {
       console.log(`[HOST] Czekam aż HOST wejdzie do środka jako pierwszy (żeby miał 👑 Hosta)...`);
 
       await this.host.eval(
-        'window.__rbColorTry = 0; window.__rbLoadingWaitTicks = 0; window.__rbTriesMaxPlayers = 0; window.__rbTriesCash = 0; window.__rbTriesBots = 0; window.__rbMakePublicTries = 0;'
+        'window.__rbColorTry = 0; window.__rbLastSettingAt = 0; window.__rbTriesMaxPlayers = 0; window.__rbTriesCash = 0; window.__rbTriesBots = 0; window.__rbMakePublicTries = 0;'
       );
 
       this.setState('WAIT_HOST_SEATED');
