@@ -78,14 +78,20 @@ function findChromePath() {
   if (process.platform === 'darwin') {
     const macCandidates = [
       '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-      '/Applications/Chromium.app/Contents/MacOS/Chromium',
+      '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser',
       '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+      '/Applications/Chromium.app/Contents/MacOS/Chromium',
+      '/Applications/Opera.app/Contents/MacOS/Opera',
+      '/Applications/Vivaldi.app/Contents/MacOS/Vivaldi',
+      '/Applications/Arc.app/Contents/MacOS/Arc',
       `${process.env.HOME}/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`,
+      `${process.env.HOME}/Applications/Brave Browser.app/Contents/MacOS/Brave Browser`,
+      `${process.env.HOME}/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge`,
     ];
     for (const p of macCandidates) {
       if (fs.existsSync(p)) return p;
     }
-    throw new Error('Nie znaleziono przeglądarki Google Chrome ani Edge w folderze /Applications na macOS!');
+    throw new Error('Nie znaleziono żadnej wspieranej przeglądarki (Chrome, Brave, Edge, Opera, Vivaldi, Chromium) w /Applications!');
   }
 
   const candidates = [
