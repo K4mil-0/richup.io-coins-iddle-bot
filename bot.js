@@ -75,6 +75,19 @@ const CONFIG = {
 };
 
 function findChromePath() {
+  if (process.platform === 'darwin') {
+    const macCandidates = [
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      '/Applications/Chromium.app/Contents/MacOS/Chromium',
+      '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+      `${process.env.HOME}/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`,
+    ];
+    for (const p of macCandidates) {
+      if (fs.existsSync(p)) return p;
+    }
+    throw new Error('Nie znaleziono przeglądarki Google Chrome ani Edge w folderze /Applications na macOS!');
+  }
+
   const candidates = [
     'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
     'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
